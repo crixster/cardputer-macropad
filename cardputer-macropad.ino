@@ -21,7 +21,7 @@
 #define HID_KEY_LEFT   0x50
 #define HID_KEY_RIGHT  0x4F
 
-#define MAX_SLOTS      10
+#define MAX_SLOTS      13
 #define LABEL_LEN      13   
 #define PAYLOAD_LEN    49   
 
@@ -38,22 +38,20 @@ struct MacroSlot {
   char    payload[PAYLOAD_LEN]; 
 };
 
-// Configured slots: 7, 8, 9, 0 (toggle key), z, x, c, v for Win Run, plus keys 5 and 6 for special hotkeys
 MacroSlot macros[MAX_SLOTS] = {
-  { false, '1',         TYPE_RAW_TEXT,     "User1",   "user1" },
-  { false, '2',         TYPE_RAW_TEXT,     "Pass1",   "pass1" },
-  { false, '3',         TYPE_RAW_TEXT,     "User2",   "user2" },
-  { false, '4',         TYPE_RAW_TEXT,     "Pass2",   "pass2" },
+  { false, '1', TYPE_WIN_RUN,      "User1",   "user1" },
+  { false, '2', TYPE_WIN_RUN,      "Pass1",   "pass1" },
+  { false, '3', TYPE_WIN_RUN,      "User2",   "user2" },
+  { false, '4', TYPE_WIN_RUN,      "Pass2",   "pass2" },
   { false, '5', TYPE_HOTKEY_COMBO, "Lock PC",  "WIN+L" },
   { false, '6', TYPE_HOTKEY_COMBO, "TaskMgr",  "CTRL+SHIFT+ESC" },
   { false, '7', TYPE_WIN_RUN,      "Notepad",  "notepad" },
   { false, '8', TYPE_WIN_RUN,      "Edge",     "msedge" },
   { false, '9', TYPE_WIN_RUN,      "Calc",     "calc" },
-  { false, 'z', TYPE_WIN_RUN,      "BMC",    "https://continentalit-smartit.onbmc.com/smartit/app/#/ticket-console" },
+  { false, 'z', TYPE_WIN_RUN,      "BMC",      "https://continentalit-smartit.onbmc.com/smartit/app/#/ticket-console" },
   { false, 'x', TYPE_WIN_RUN,      "App 2",    "C:\\path\\to\\app2.exe" },
   { false, 'c', TYPE_WIN_RUN,      "Site A",   "https://example.com" },
   { false, 'v', TYPE_WIN_RUN,      "Site B",   "https://google.com" },
-
 };
 
 USBHIDKeyboard Keyboard;
