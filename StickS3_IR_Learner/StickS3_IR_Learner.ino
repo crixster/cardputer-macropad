@@ -528,7 +528,7 @@ void setup() {
   if (!setupTx()) fatal("TX init failed");
   if (!setupRx()) fatal("RX init failed");
 
-  msg = "Ready";
+  msg = "Ready v4";
   drawUI();
   printHelp();
 }
