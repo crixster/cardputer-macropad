@@ -21,15 +21,17 @@ jobs:
           arduino-cli core install esp32:esp32
           arduino-cli lib install M5Cardputer M5GFX M5Unified Preferences
 
-      - name: Compile Sketch
+      - name: Prepare Sketch Structure and Compile
         run: |
-          # Create directory structure matching the sketch name if needed, or compile directly
-          mkdir -p CardputerMacroPad
-          cp *.ino CardputerMacroPad/
-          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=default,USBMode=default --export-binaries CardputerMacroPad
+          # Create a proper Arduino sketch folder and move the .ino file into it
+          mkdir -p cardputer-macropad
+          mv cardputer-macropad.ino cardputer-macropad/
+          
+          # Compile the properly structured sketch folder
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=default,USBMode=default --export-binaries cardputer-macropad
 
       - name: Upload Compiled Binary Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: cardputer-macropad-firmware
-          path: CardputerMacroPad/build/**/*.bin
+          path: '**/build/**/*.bin'
