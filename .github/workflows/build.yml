@@ -1,0 +1,23 @@
+name: Build firmware
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install core and libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+          arduino-cli core update-index
+          arduino-cli core install m5stack:esp32
+          arduino-cli lib install M5Unified M5GFX
+      - name: Show board options
+        run: arduino-cli board details -b m5stack:esp32:m5stack_sticks3 --list-programmers || true
+      - name: Compile
+        run: arduino-cli compile --fqbn m5stack:esp32:m5stack_sticks3 --export-binaries StickS3_IR_Learner
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: StickS3_IR_Learner/build/**/*.bin
