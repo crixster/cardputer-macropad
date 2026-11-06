@@ -23,7 +23,7 @@
 
 #define MAX_SLOTS      13
 #define LABEL_LEN      13   
-#define PAYLOAD_LEN    49   
+#define PAYLOAD_LEN    128   
 
 enum MacroType : uint8_t {
   TYPE_WIN_RUN      = 0,  
