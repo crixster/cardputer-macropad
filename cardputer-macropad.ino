@@ -38,7 +38,6 @@
 */
 
 #include <M5Cardputer.h>
-#include <M5Canvas.h>
 #include <USB.h>
 #include <USBHIDKeyboard.h>
 #include <Preferences.h>
