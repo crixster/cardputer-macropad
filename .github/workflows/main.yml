@@ -1,0 +1,17 @@
+   name: List boards
+   on: workflow_dispatch
+   jobs:
+     list:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: arduino/setup-arduino-cli@v2
+         - name: Find StickS3 board
+           run: |
+             arduino-cli config init
+             arduino-cli config add board_manager.additional_urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+             arduino-cli core update-index
+             arduino-cli core install m5stack:esp32
+             echo "=== Stick boards ==="
+             arduino-cli board listall | grep -i stick || true
+             echo "=== All m5stack boards ==="
+             arduino-cli board listall | grep -i m5stack || true
