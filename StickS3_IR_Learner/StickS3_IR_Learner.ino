@@ -19,7 +19,7 @@
  *   fname <text>  rename current folder      label <text>  label current slot
  *   del           delete current slot        delall        delete ALL slots in current folder
  *   list          show folder contents       help          show commands
- *   idle <ms>     RX end-of-capture gap (10-120) for current folder
+ *   idle <ms>     RX end-of-capture gap (10-65) for current folder
  *   verify on|off require two matching presses for current folder
  *   (Arduino IDE: Tools -> USB CDC On Boot = Enabled to use the Serial Monitor)
  */
@@ -40,15 +40,16 @@
 #define CARRIER_HZ         38000       // change to 36000/40000/56000 if needed
 #define CARRIER_DUTY       0.33f
 #define MIN_VALID_DURS     6
-#define RX_RES_HZ          250000      // RX tick = 4 us (lets RX idle go up to ~130 ms)
-#define RX_TICK_US         4
+#define RX_RES_HZ          500000      // RX tick = 2 us (RX idle can go up to ~65 ms)
+#define RX_TICK_US         2
+#define MAX_IDLE_MS        65
 
 // Per-folder defaults (change later with serial commands: idle <ms>, verify on|off)
-//   idle   = silence that ends a capture. Short (30) for TV/audio, long (100) for
+//   idle   = silence that ends a capture. Short (30) for TV/audio, long (60) for
 //            air conditioners, which send several frames with 20-40 ms gaps.
 //   verify = require two matching presses (good for TVs; NOT for ACs, because
 //            pressing an AC key twice usually sends two different states).
-static const uint16_t DEFAULT_IDLE_MS[NUM_FOLDERS] = { 30, 100, 30, 30, 30, 30, 30, 30 };
+static const uint16_t DEFAULT_IDLE_MS[NUM_FOLDERS] = { 30, 60, 30, 30, 30, 30, 30, 30 };
 static const bool     DEFAULT_VERIFY[NUM_FOLDERS]  = { true, false, true, true, true, true, true, true };
 
 static const char *DEFAULT_FOLDERS[NUM_FOLDERS] = {
@@ -283,17 +284,30 @@ static bool setupRx() {
 
   esp_err_t e = rmt_new_rx_channel(&c, &rx_chan);
   if (e != ESP_OK) {
+    Serial.printf("RX channel (DMA) failed: %s\n", esp_err_to_name(e));
     c.mem_block_symbols = 128;
     c.flags.with_dma = 0;
     rx_buf_syms = 128;
     e = rmt_new_rx_channel(&c, &rx_chan);
   }
-  if (e != ESP_OK) return false;
+  if (e != ESP_OK) {
+    Serial.printf("RX channel (no DMA) failed: %s\n", esp_err_to_name(e));
+    return false;
+  }
 
   rmt_rx_event_callbacks_t cbs = {};
   cbs.on_recv_done = rxDoneCb;
-  if (rmt_rx_register_event_callbacks(rx_chan, &cbs, rx_queue) != ESP_OK) return false;
-  return rmt_enable(rx_chan) == ESP_OK;
+  e = rmt_rx_register_event_callbacks(rx_chan, &cbs, rx_queue);
+  if (e != ESP_OK) {
+    Serial.printf("RX callbacks failed: %s\n", esp_err_to_name(e));
+    return false;
+  }
+  e = rmt_enable(rx_chan);
+  if (e != ESP_OK) {
+    Serial.printf("RX enable failed: %s\n", esp_err_to_name(e));
+    return false;
+  }
+  return true;
 }
 
 static bool armReceive() {
@@ -419,7 +433,7 @@ static void handleCapture(const rmt_rx_done_event_data_t &ev) {
 
 // ---------------- serial commands ----------------
 static void printHelp() {
-  Serial.println("Commands: fname <text> | label <text> | del | delall | list | idle <10-120> | verify on|off | help");
+  Serial.println("Commands: fname <text> | label <text> | del | delall | list | idle <10-65> | verify on|off | help");
 }
 
 static void handleSerialLine(String line) {
@@ -444,7 +458,7 @@ static void handleSerialLine(String line) {
   } else if (cmd == "idle" && arg.length()) {
     int v = arg.toInt();
     if (v < 10) v = 10;
-    if (v > 120) v = 120;
+    if (v > MAX_IDLE_MS) v = MAX_IDLE_MS;
     folderIdleMs[curFolder] = v;
     prefs.putUShort(idleKey(curFolder).c_str(), v);
     msg = "Idle set";
@@ -504,12 +518,15 @@ void setup() {
   for (int f = 0; f < NUM_FOLDERS; f++) {
     folderName[f] = prefs.getString(folderKey(f).c_str(), DEFAULT_FOLDERS[f]);
     folderIdleMs[f] = prefs.getUShort(idleKey(f).c_str(), DEFAULT_IDLE_MS[f]);
+    if (folderIdleMs[f] > MAX_IDLE_MS) folderIdleMs[f] = MAX_IDLE_MS;
+    if (folderIdleMs[f] < 10) folderIdleMs[f] = 10;
     folderVerify[f] = prefs.getBool(verifyKey(f).c_str(), DEFAULT_VERIFY[f]);
   }
 
   scanSlots();
 
-  if (!setupTx() || !setupRx()) fatal("RMT init failed");
+  if (!setupTx()) fatal("TX init failed");
+  if (!setupRx()) fatal("RX init failed");
 
   msg = "Ready";
   drawUI();
