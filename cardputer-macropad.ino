@@ -29,15 +29,16 @@
 
   LIBRARIES REQUIRED (install via Arduino Library Manager / Board Manager)
   --------------------------------------------------------------------------
-    - M5Cardputer          (M5Stack)         -> pulls in M5GFX / M5Unified
-    - USB                  (bundled with ESP32 Arduino core, S3/S2 only)
-    - USBHIDKeyboard        (bundled with ESP32 Arduino core, S3/S2 only)
-    - Preferences           (bundled with ESP32 Arduino core)
+    - M5Cardputer         (M5Stack)         -> pulls in M5GFX / M5Unified
+    - USB                 (bundled with ESP32 Arduino core, S3/S2 only)
+    - USBHIDKeyboard      (bundled with ESP32 Arduino core, S3/S2 only)
+    - Preferences         (bundled with ESP32 Arduino core)
 
   ============================================================================
 */
 
 #include <M5Cardputer.h>
+#include <M5Canvas.h>
 #include <USB.h>
 #include <USBHIDKeyboard.h>
 #include <Preferences.h>
@@ -50,8 +51,6 @@
 // ---------------------------------------------------------------------------
 // Raw USB HID Usage IDs (Keyboard/Keypad page) used to read the Cardputer's
 // non-printable / Fn-combo keys out of keysState().hid_keys.
-// These are standard USB HID usage table values; adjust only if your
-// installed M5Cardputer library version reports different raw codes.
 // ---------------------------------------------------------------------------
 #define HID_KEY_ESC    0x29
 #define HID_KEY_UP     0x52
@@ -62,9 +61,9 @@
 // ---------------------------------------------------------------------------
 // Macro slot model
 // ---------------------------------------------------------------------------
-#define MAX_SLOTS     14
-#define LABEL_LEN     13   // 12 visible chars + null terminator
-#define PAYLOAD_LEN   49   // 48 visible chars + null terminator
+#define MAX_SLOTS      14
+#define LABEL_LEN      13   // 12 visible chars + null terminator
+#define PAYLOAD_LEN    49   // 48 visible chars + null terminator
 
 enum MacroType : uint8_t {
   TYPE_RAW_TEXT     = 0,  // type payload verbatim
@@ -74,26 +73,15 @@ enum MacroType : uint8_t {
 
 struct MacroSlot {
   bool    special;              // false: key is a plain ASCII char, read from
-                                 //        status.word (e.g. '1', 'a').
-                                 // true:  key is a raw HID usage code, read
-                                 //        from status.hid_keys (arrows, etc.)
+                                //        status.word (e.g. '1', 'a').
+                                // true:  key is a raw HID usage code, read
+                                //        from status.hid_keys (arrows, etc.)
   uint8_t key;                  // ASCII char (as uint8_t) OR HID usage code
   uint8_t type;                 // MacroType
   char    label[LABEL_LEN];     // short human-readable name shown on screen
   char    payload[PAYLOAD_LEN]; // text / command / combo descriptor
 };
 
-// Slots 0-9 are bound to the top number row '1'..'9','0' -- easy to reach,
-// never collide with normal typing in ACTIVE MODE because ACTIVE MODE
-// intentionally eats every keystroke and only forwards mapped ones.
-// Slots 10-13 are bound to the Fn-combo arrow keys (Up/Left/Down/Right),
-// which never appear in status.word -- they're read from status.hid_keys
-// instead, hence "special = true" and a raw HID_KEY_* code rather than an
-// ASCII char. ALL label/type/payload fields below are freely editable from
-// EDITOR MODE and persist to NVS the moment you commit them with ENTER --
-// only the trigger key itself (the ASCII char or HID_KEY_* code) is fixed
-// in firmware for this build, since Editor Mode reserves the arrow keys
-// for its own list/field navigation.
 MacroSlot macros[MAX_SLOTS] = {
   { false, '1',         TYPE_RAW_TEXT,     "User1",   "user1" },
   { false, '2',         TYPE_RAW_TEXT,     "Pass1",   "pass1" },
@@ -125,13 +113,13 @@ AppMode appMode = MODE_ACTIVE;
 enum EditorFocus { FOCUS_LIST, FOCUS_FIELD };
 enum EditorField  { FIELD_TYPE = 0, FIELD_LABEL = 1, FIELD_PAYLOAD = 2, FIELD_COUNT = 3 };
 
-EditorFocus editorFocus   = FOCUS_LIST;
-int         selectedSlot  = 0;
-int         selectedField = FIELD_TYPE;
-bool        textEditing   = false;      // true while live-typing a field
+EditorFocus editorFocus    = FOCUS_LIST;
+int         selectedSlot   = 0;
+int         selectedField  = FIELD_TYPE;
+bool        textEditing    = false;      // true while live-typing a field
 char        editBuffer[PAYLOAD_LEN];    // scratch buffer for live text edit
 size_t      editBufferLen = 0;
-bool        uiDirty       = true;       // redraw flag
+bool        uiDirty        = true;       // redraw flag
 
 // ---------------------------------------------------------------------------
 // Forward declarations
@@ -155,14 +143,14 @@ const char *keyLabel(const MacroSlot &m, char buf[4]);
 // setup()
 // ===========================================================================
 void setup() {
-  // Required Stamp-S3 power hold line -- must be asserted before anything
-  // else draws meaningful current.
   pinMode(STAMP_S3_POWER_HOLD_PIN, OUTPUT);
   digitalWrite(STAMP_S3_POWER_HOLD_PIN, HIGH);
 
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
-  M5Cardputer.Display.setRotation(1);
+  
+  // Corrected screen orientation for landscape Cardputer keyboard layout
+  M5Cardputer.Display.setRotation(3);
   M5Cardputer.Display.setBrightness(80);
 
   canvas.setColorDepth(8);
@@ -186,17 +174,17 @@ void setup() {
 void loop() {
   M5Cardputer.update();
 
-  if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
-    Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+  if (M5Cardputer.Keyboard.isChange()) {
+    if (M5Cardputer.Keyboard.isPressed()) {
+      Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
 
-    if (hidKeyPresent(status, HID_KEY_ESC)) {
-      // ESC (Fn + `) is reserved exclusively for the mode toggle and is
-      // never passed through to either macro lookup or text editing.
-      toggleMode();
-    } else if (appMode == MODE_ACTIVE) {
-      handleActiveModeInput(status);
-    } else {
-      handleEditorInput(status);
+      if (hidKeyPresent(status, HID_KEY_ESC) || (status.word.size() > 0 && status.word[0] == 0x1B)) {
+        toggleMode();
+      } else if (appMode == MODE_ACTIVE) {
+        handleActiveModeInput(status);
+      } else {
+        handleEditorInput(status);
+      }
     }
   }
 
@@ -217,13 +205,11 @@ void loop() {
 void toggleMode() {
   if (appMode == MODE_ACTIVE) {
     appMode = MODE_EDITOR;
-    editorFocus   = FOCUS_LIST;
-    textEditing   = false;
-    selectedSlot  = 0;
-    selectedField = FIELD_TYPE;
+    editorFocus    = FOCUS_LIST;
+    textEditing    = false;
+    selectedSlot   = 0;
+    selectedField  = FIELD_TYPE;
   } else {
-    // Leaving the editor: make sure a half-finished text edit is discarded,
-    // not silently committed.
     textEditing = false;
     appMode = MODE_ACTIVE;
   }
@@ -234,11 +220,6 @@ void toggleMode() {
 // ACTIVE MODE: strict lookup-or-ignore key handling
 // ===========================================================================
 void handleActiveModeInput(const Keyboard_Class::KeysState &status) {
-  // Any key (or combination) that is not bound to a slot with a non-empty
-  // payload produces zero USB HID output -- this is the core "silent by
-  // default" requirement. Two independent trigger sources are scanned:
-  //   - status.word:     printable characters (number row, letters, etc.)
-  //   - status.hid_keys: non-printable / Fn-combo keys (arrows, etc.)
   for (char c : status.word) {
     for (int i = 0; i < MAX_SLOTS; i++) {
       if (!macros[i].special && macros[i].key == (uint8_t)c && macros[i].payload[0] != '\0') {
@@ -279,14 +260,12 @@ void sendWinRun(const char *payload) {
   Keyboard.press('r');
   delay(40);
   Keyboard.releaseAll();
-  delay(120); // give the Run dialog time to appear before we start typing
+  delay(120); 
   Keyboard.print(payload);
   delay(40);
   Keyboard.write(KEY_RETURN);
 }
 
-// Parses payload strings like "WIN+L", "CTRL+SHIFT+ESC", "ALT+F4" and
-// presses all modifiers + the final key together, then releases everything.
 void sendHotkeyCombo(const char *payload) {
   char buf[PAYLOAD_LEN];
   strncpy(buf, payload, sizeof(buf));
@@ -298,7 +277,6 @@ void sendHotkeyCombo(const char *payload) {
   char finalChar = 0;
 
   while (token != nullptr) {
-    // Trim leading/trailing spaces
     while (*token == ' ') token++;
     size_t len = strlen(token);
     while (len > 0 && token[len - 1] == ' ') { token[len - 1] = '\0'; len--; }
@@ -326,7 +304,6 @@ void sendHotkeyCombo(const char *payload) {
         finalKeyIsChar = false;
       }
     } else if (len == 1) {
-      // Single printable character, e.g. "L" in WIN+L
       finalChar = tolower((unsigned char)token[0]);
       finalKeyIsChar = true;
     }
@@ -349,7 +326,6 @@ void sendHotkeyCombo(const char *payload) {
 // ===========================================================================
 void handleEditorInput(const Keyboard_Class::KeysState &status) {
   if (textEditing) {
-    // --- Live text entry for Label or Payload ---
     if (status.del) {
       if (editBufferLen > 0) {
         editBufferLen--;
@@ -359,9 +335,8 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
       return;
     }
     if (status.enter) {
-      // Commit to the in-RAM slot and persist to NVS
       char *dest = (selectedField == FIELD_LABEL) ? macros[selectedSlot].label
-                                                    : macros[selectedSlot].payload;
+                                                   : macros[selectedSlot].payload;
       size_t destCap = (selectedField == FIELD_LABEL) ? LABEL_LEN : PAYLOAD_LEN;
       strncpy(dest, editBuffer, destCap - 1);
       dest[destCap - 1] = '\0';
@@ -370,7 +345,6 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
       uiDirty = true;
       return;
     }
-    // Append any typed printable characters (bounded by buffer capacity)
     size_t destCap = (selectedField == FIELD_LABEL) ? (LABEL_LEN - 1) : (PAYLOAD_LEN - 1);
     for (char c : status.word) {
       if (editBufferLen < destCap) {
@@ -383,7 +357,6 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
   }
 
   if (editorFocus == FOCUS_LIST) {
-    // --- Navigating the slot list ---
     if (hidKeyPresent(status, HID_KEY_UP)) {
       selectedSlot = (selectedSlot - 1 + MAX_SLOTS) % MAX_SLOTS;
       uiDirty = true;
@@ -396,7 +369,6 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
       uiDirty = true;
     }
   } else {
-    // --- Editing fields (Type / Label / Payload) within the selected slot ---
     if (hidKeyPresent(status, HID_KEY_LEFT)) {
       editorFocus = FOCUS_LIST;
       uiDirty = true;
@@ -412,10 +384,9 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
         saveSlot(selectedSlot);
         uiDirty = true;
       } else {
-        // Enter live text-edit mode, pre-loaded with the current value
         textEditing = true;
         const char *src = (selectedField == FIELD_LABEL) ? macros[selectedSlot].label
-                                                           : macros[selectedSlot].payload;
+                                                         : macros[selectedSlot].payload;
         strncpy(editBuffer, src, sizeof(editBuffer) - 1);
         editBuffer[sizeof(editBuffer) - 1] = '\0';
         editBufferLen = strlen(editBuffer);
@@ -458,8 +429,6 @@ void loadMacros() {
       strncpy(macros[i].payload, pl.c_str(), PAYLOAD_LEN - 1);
       macros[i].payload[PAYLOAD_LEN - 1] = '\0';
     }
-    // If no NVS entry exists yet for this slot, the compiled-in default
-    // above remains in effect until the user edits and saves it.
   }
 }
 
@@ -493,9 +462,6 @@ const char *typeName(uint8_t type) {
   }
 }
 
-// Renders a slot's trigger as a short printable string: the literal
-// character for normal slots, or a 2-letter mnemonic for special
-// (HID-code) slots like the arrow keys. buf must be at least 4 bytes.
 const char *keyLabel(const MacroSlot &m, char buf[4]) {
   if (!m.special) {
     buf[0] = (char)m.key;
@@ -544,9 +510,8 @@ void drawEditorUI() {
   canvas.fillRect(0, 0, 240, 14, MAROON);
   canvas.setTextColor(WHITE, MAROON);
   canvas.setCursor(4, 3);
-  canvas.print("EDITOR MODE   ESC=Exit");
+  canvas.print("EDITOR MODE    ESC=Exit");
 
-  // Left column: slot list (13 slots at 8px rows fits the 117px list area)
   int y = 18;
   char kbuf[4];
   for (int i = 0; i < MAX_SLOTS; i++) {
@@ -565,19 +530,18 @@ void drawEditorUI() {
     y += 8;
   }
 
-  // Right panel: fields for the open slot
   if (editorFocus == FOCUS_FIELD) {
     canvas.drawRect(120, 16, 118, 118, DARKGREY);
     int fy = 20;
 
     canvas.setTextColor(selectedField == FIELD_TYPE ? BLACK : WHITE,
-                         selectedField == FIELD_TYPE ? ORANGE : BLACK);
+                       selectedField == FIELD_TYPE ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
     canvas.printf("Type: %s", typeName(macros[selectedSlot].type));
     fy += 14;
 
     canvas.setTextColor(selectedField == FIELD_LABEL ? BLACK : WHITE,
-                         selectedField == FIELD_LABEL ? ORANGE : BLACK);
+                       selectedField == FIELD_LABEL ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
     if (textEditing && selectedField == FIELD_LABEL) {
       canvas.printf("Lbl:%.12s_", editBuffer);
@@ -587,7 +551,7 @@ void drawEditorUI() {
     fy += 14;
 
     canvas.setTextColor(selectedField == FIELD_PAYLOAD ? BLACK : WHITE,
-                         selectedField == FIELD_PAYLOAD ? ORANGE : BLACK);
+                       selectedField == FIELD_PAYLOAD ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
     if (textEditing && selectedField == FIELD_PAYLOAD) {
       canvas.printf("Pay:%.16s_", editBuffer);
