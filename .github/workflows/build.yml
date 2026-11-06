@@ -1,23 +1,35 @@
-name: Build firmware
-on: workflow_dispatch
+name: Build Cardputer MacroPad Firmware
+
+on:
+  workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-arduino-cli@v2
-      - name: Install core and libraries
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Core and Libraries
         run: |
           arduino-cli config init
-          arduino-cli config add board_manager.additional_urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install m5stack:esp32
-          arduino-cli lib install M5Unified M5GFX
-      - name: Show board options
-        run: arduino-cli board details -b m5stack:esp32:m5stack_sticks3 --list-programmers || true
-      - name: Compile
-        run: arduino-cli compile --fqbn m5stack:esp32:m5stack_sticks3 --export-binaries StickS3_IR_Learner
-      - uses: actions/upload-artifact@v4
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install M5Cardputer M5GFX M5Unified Preferences
+
+      - name: Compile Sketch
+        run: |
+          # Create directory structure matching the sketch name if needed, or compile directly
+          mkdir -p CardputerMacroPad
+          cp *.ino CardputerMacroPad/
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=default,USBMode=default --export-binaries CardputerMacroPad
+
+      - name: Upload Compiled Binary Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: firmware
-          path: StickS3_IR_Learner/build/**/*.bin
+          name: cardputer-macropad-firmware
+          path: CardputerMacroPad/build/**/*.bin
