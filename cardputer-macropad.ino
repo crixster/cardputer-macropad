@@ -23,11 +23,12 @@
 
 #define MAX_SLOTS      13
 #define LABEL_LEN      13   
-#define PAYLOAD_LEN    128   
+#define PAYLOAD_LEN    128   // Increased to support long URLs and paths
 
 enum MacroType : uint8_t {
-  TYPE_WIN_RUN      = 0,  
-  TYPE_HOTKEY_COMBO = 1   
+  TYPE_RAW_TEXT     = 0,  // Types text directly (for usernames/passwords)
+  TYPE_WIN_RUN      = 1,  // Opens Win+R, types command/path, hits Enter
+  TYPE_HOTKEY_COMBO = 2   // Executes hotkey combination (e.g., WIN+L)
 };
 
 struct MacroSlot {
@@ -39,10 +40,10 @@ struct MacroSlot {
 };
 
 MacroSlot macros[MAX_SLOTS] = {
-  { false, '1', TYPE_RAW_TEXT,      "User1",   "user1" },
-  { false, '2', TYPE_RAW_TEXT,      "Pass1",   "pass1" },
-  { false, '3', TYPE_RAW_TEXT,      "User2",   "user2" },
-  { false, '4', TYPE_RAW_TEXT,      "Pass2",   "pass2" },
+  { false, '1', TYPE_RAW_TEXT,     "User1",    "user1" },
+  { false, '2', TYPE_RAW_TEXT,     "Pass1",    "pass1" },
+  { false, '3', TYPE_RAW_TEXT,     "User2",    "user2" },
+  { false, '4', TYPE_RAW_TEXT,     "Pass2",    "pass2" },
   { false, '5', TYPE_HOTKEY_COMBO, "Lock PC",  "WIN+L" },
   { false, '6', TYPE_HOTKEY_COMBO, "TaskMgr",  "CTRL+SHIFT+ESC" },
   { false, '7', TYPE_WIN_RUN,      "Notepad",  "notepad" },
@@ -79,6 +80,7 @@ void drawEditorUI();
 void handleActiveModeInput(const Keyboard_Class::KeysState &status);
 void handleEditorInput(const Keyboard_Class::KeysState &status);
 void executeMacro(int idx);
+void sendRawText(const char *payload);
 void sendWinRun(const char *payload);
 void sendHotkeyCombo(const char *payload);
 void toggleMode();
@@ -116,7 +118,6 @@ void loop() {
     if (M5Cardputer.Keyboard.isPressed()) {
       Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
 
-      // Check if '0' was pressed to toggle mode
       bool hitZero = false;
       for (char c : status.word) {
         if (c == '0') { hitZero = true; break; }
@@ -171,10 +172,15 @@ void handleActiveModeInput(const Keyboard_Class::KeysState &status) {
 void executeMacro(int idx) {
   MacroSlot &m = macros[idx];
   switch (m.type) {
+    case TYPE_RAW_TEXT:     sendRawText(m.payload);     break;
     case TYPE_WIN_RUN:      sendWinRun(m.payload);      break;
     case TYPE_HOTKEY_COMBO: sendHotkeyCombo(m.payload); break;
     default: break;
   }
+}
+
+void sendRawText(const char *payload) {
+  Keyboard.print(payload);
 }
 
 void sendWinRun(const char *payload) {
@@ -284,7 +290,7 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
       uiDirty = true;
     } else if (status.enter) {
       if (selectedField == FIELD_TYPE) {
-        macros[selectedSlot].type = (macros[selectedSlot].type + 1) % 2;
+        macros[selectedSlot].type = (macros[selectedSlot].type + 1) % 3;
         saveSlot(selectedSlot);
         uiDirty = true;
       } else {
@@ -347,6 +353,7 @@ void saveSlot(int idx) {
 
 const char *typeName(uint8_t type) {
   switch (type) {
+    case TYPE_RAW_TEXT:     return "RAW_TEXT";
     case TYPE_WIN_RUN:      return "WIN_RUN";
     case TYPE_HOTKEY_COMBO: return "HOTKEY";
     default:                return "?";
