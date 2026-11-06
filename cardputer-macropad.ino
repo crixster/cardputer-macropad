@@ -5,35 +5,6 @@
   M5Stack Cardputer (v1.1) -> USB HID Macro Keyboard & Command Launcher
   Target host: Windows 11
   MCU: ESP32-S3 (Stamp-S3), 240x135 TFT, 56-key matrix keyboard
-
-  OPERATIONAL SUMMARY
-  --------------------
-  - On boot the device enumerates as a native USB HID keyboard and sits in
-    ACTIVE MODE. Every physical keypress is looked up in a fixed-size table
-    of macro slots. If the key is not bound to a slot with a non-empty
-    payload, NOTHING is sent over USB -- the device is silent for that key.
-  - Pressing ESC (Fn + `) toggles between ACTIVE MODE and EDITOR MODE.
-  - EDITOR MODE lets you walk through macro slots, change the execution
-    engine (RAW_TEXT / WIN_RUN / HOTKEY_COMBO), and live-edit the Label and
-    Payload strings using the Cardputer's own keyboard. Changes are written
-    to NVS (via Preferences) as soon as you commit them with ENTER, so the
-    configuration survives power loss and reflashing of this same sketch.
-
-  SECURITY NOTE
-  --------------
-  RAW_TEXT payloads (e.g. passwords/snippets) are stored in plaintext in
-  NVS flash, exactly as requested. Anyone with physical access to the
-  device (or the ability to read its flash) can recover these strings.
-  Do not store anything on this device you are not comfortable having
-  exposed if the hardware is lost or stolen.
-
-  LIBRARIES REQUIRED (install via Arduino Library Manager / Board Manager)
-  --------------------------------------------------------------------------
-    - M5Cardputer         (M5Stack)         -> pulls in M5GFX / M5Unified
-    - USB                 (bundled with ESP32 Arduino core, S3/S2 only)
-    - USBHIDKeyboard      (bundled with ESP32 Arduino core, S3/S2 only)
-    - Preferences         (bundled with ESP32 Arduino core)
-
   ============================================================================
 */
 
@@ -42,65 +13,49 @@
 #include <USBHIDKeyboard.h>
 #include <Preferences.h>
 
-// ---------------------------------------------------------------------------
-// Hardware power line (Stamp-S3) -- REQUIRED per board bring-up requirements
-// ---------------------------------------------------------------------------
 #define STAMP_S3_POWER_HOLD_PIN 38
 
-// ---------------------------------------------------------------------------
-// Raw USB HID Usage IDs (Keyboard/Keypad page) used to read the Cardputer's
-// non-printable / Fn-combo keys out of keysState().hid_keys.
-// ---------------------------------------------------------------------------
-#define HID_KEY_ESC    0x29
+// Raw HID usage codes for Cardputer arrow keys
 #define HID_KEY_UP     0x52
 #define HID_KEY_DOWN   0x51
 #define HID_KEY_LEFT   0x50
 #define HID_KEY_RIGHT  0x4F
 
-// ---------------------------------------------------------------------------
-// Macro slot model
-// ---------------------------------------------------------------------------
-#define MAX_SLOTS      14
-#define LABEL_LEN      13   // 12 visible chars + null terminator
-#define PAYLOAD_LEN    49   // 48 visible chars + null terminator
+#define MAX_SLOTS      10
+#define LABEL_LEN      13   
+#define PAYLOAD_LEN    49   
 
 enum MacroType : uint8_t {
-  TYPE_RAW_TEXT     = 0,  // type payload verbatim
-  TYPE_WIN_RUN      = 1,  // Win+R, type payload, Enter
-  TYPE_HOTKEY_COMBO = 2   // payload parsed as "MOD+MOD+KEY", e.g. "WIN+L"
+  TYPE_WIN_RUN      = 0,  
+  TYPE_HOTKEY_COMBO = 1   
 };
 
 struct MacroSlot {
-  bool    special;              // false: key is a plain ASCII char, read from
-                                //        status.word (e.g. '1', 'a').
-                                // true:  key is a raw HID usage code, read
-                                //        from status.hid_keys (arrows, etc.)
-  uint8_t key;                  // ASCII char (as uint8_t) OR HID usage code
-  uint8_t type;                 // MacroType
-  char    label[LABEL_LEN];     // short human-readable name shown on screen
-  char    payload[PAYLOAD_LEN]; // text / command / combo descriptor
+  bool    special;              
+  uint8_t key;                  
+  uint8_t type;                 
+  char    label[LABEL_LEN];     
+  char    payload[PAYLOAD_LEN]; 
 };
 
+// Configured slots: 7, 8, 9, 0 (toggle key), z, x, c, v for Win Run, plus keys 5 and 6 for special hotkeys
 MacroSlot macros[MAX_SLOTS] = {
   { false, '1',         TYPE_RAW_TEXT,     "User1",   "user1" },
   { false, '2',         TYPE_RAW_TEXT,     "Pass1",   "pass1" },
   { false, '3',         TYPE_RAW_TEXT,     "User2",   "user2" },
   { false, '4',         TYPE_RAW_TEXT,     "Pass2",   "pass2" },
-  { false, '5',         TYPE_HOTKEY_COMBO, "Lock",    "WIN+L" },
-  { false, '6',         TYPE_HOTKEY_COMBO, "TaskMgr", "CTRL+SHIFT+ESC" },
-  { false, '7',         TYPE_RAW_TEXT,     "Email",   "user@example.com" },
-  { false, '8',         TYPE_RAW_TEXT,     "",        "" },
-  { false, '9',         TYPE_RAW_TEXT,     "",        "" },
-  { false, '0',         TYPE_RAW_TEXT,     "",        "" },
-  { true,  HID_KEY_UP,    TYPE_WIN_RUN, "Edge",  "msedge" },
-  { true,  HID_KEY_LEFT,  TYPE_WIN_RUN, "Run A", "C:\\path\\to\\file.exe" },
-  { true,  HID_KEY_DOWN,  TYPE_WIN_RUN, "Run B", "https://example.com" },
-  { true,  HID_KEY_RIGHT, TYPE_WIN_RUN, "Run C", "notepad" },
+  { false, '5', TYPE_HOTKEY_COMBO, "Lock PC",  "WIN+L" },
+  { false, '6', TYPE_HOTKEY_COMBO, "TaskMgr",  "CTRL+SHIFT+ESC" },
+  { false, '7', TYPE_WIN_RUN,      "Notepad",  "notepad" },
+  { false, '8', TYPE_WIN_RUN,      "Edge",     "msedge" },
+  { false, '9', TYPE_WIN_RUN,      "Calc",     "calc" },
+  { false, 'z', TYPE_WIN_RUN,      "BMC",    "https://continentalit-smartit.onbmc.com/smartit/app/#/ticket-console" },
+  { false, 'x', TYPE_WIN_RUN,      "App 2",    "C:\\path\\to\\app2.exe" },
+  { false, 'c', TYPE_WIN_RUN,      "Site A",   "https://example.com" },
+  { false, 'v', TYPE_WIN_RUN,      "Site B",   "https://google.com" },
+
 };
 
-// ---------------------------------------------------------------------------
-// Globals
-// ---------------------------------------------------------------------------
 USBHIDKeyboard Keyboard;
 Preferences    prefs;
 M5Canvas       canvas(&M5Cardputer.Display);
@@ -108,21 +63,17 @@ M5Canvas       canvas(&M5Cardputer.Display);
 enum AppMode { MODE_ACTIVE, MODE_EDITOR };
 AppMode appMode = MODE_ACTIVE;
 
-// Editor sub-state
 enum EditorFocus { FOCUS_LIST, FOCUS_FIELD };
 enum EditorField  { FIELD_TYPE = 0, FIELD_LABEL = 1, FIELD_PAYLOAD = 2, FIELD_COUNT = 3 };
 
 EditorFocus editorFocus    = FOCUS_LIST;
 int         selectedSlot   = 0;
 int         selectedField  = FIELD_TYPE;
-bool        textEditing    = false;      // true while live-typing a field
-char        editBuffer[PAYLOAD_LEN];    // scratch buffer for live text edit
+bool        textEditing    = false;      
+char        editBuffer[PAYLOAD_LEN];    
 size_t      editBufferLen = 0;
-bool        uiDirty        = true;       // redraw flag
+bool        uiDirty        = true;       
 
-// ---------------------------------------------------------------------------
-// Forward declarations
-// ---------------------------------------------------------------------------
 void loadMacros();
 void saveSlot(int idx);
 void drawActiveModeUI();
@@ -130,17 +81,12 @@ void drawEditorUI();
 void handleActiveModeInput(const Keyboard_Class::KeysState &status);
 void handleEditorInput(const Keyboard_Class::KeysState &status);
 void executeMacro(int idx);
-void sendRawText(const char *payload);
 void sendWinRun(const char *payload);
 void sendHotkeyCombo(const char *payload);
 void toggleMode();
 bool hidKeyPresent(const Keyboard_Class::KeysState &status, uint8_t code);
 const char *typeName(uint8_t type);
-const char *keyLabel(const MacroSlot &m, char buf[4]);
 
-// ===========================================================================
-// setup()
-// ===========================================================================
 void setup() {
   pinMode(STAMP_S3_POWER_HOLD_PIN, OUTPUT);
   digitalWrite(STAMP_S3_POWER_HOLD_PIN, HIGH);
@@ -148,7 +94,6 @@ void setup() {
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
   
-  // Corrected screen orientation for landscape Cardputer keyboard layout
   M5Cardputer.Display.setRotation(3);
   M5Cardputer.Display.setBrightness(80);
 
@@ -156,7 +101,6 @@ void setup() {
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
   canvas.setTextSize(1);
 
-  // USB HID bring-up
   USB.begin();
   Keyboard.begin();
 
@@ -167,9 +111,6 @@ void setup() {
   uiDirty = true;
 }
 
-// ===========================================================================
-// loop()
-// ===========================================================================
 void loop() {
   M5Cardputer.update();
 
@@ -177,7 +118,13 @@ void loop() {
     if (M5Cardputer.Keyboard.isPressed()) {
       Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
 
-      if (hidKeyPresent(status, HID_KEY_ESC) || (status.word.size() > 0 && status.word[0] == 0x1B)) {
+      // Check if '0' was pressed to toggle mode
+      bool hitZero = false;
+      for (char c : status.word) {
+        if (c == '0') { hitZero = true; break; }
+      }
+
+      if (hitZero) {
         toggleMode();
       } else if (appMode == MODE_ACTIVE) {
         handleActiveModeInput(status);
@@ -198,9 +145,6 @@ void loop() {
   }
 }
 
-// ===========================================================================
-// Mode toggle
-// ===========================================================================
 void toggleMode() {
   if (appMode == MODE_ACTIVE) {
     appMode = MODE_EDITOR;
@@ -215,21 +159,10 @@ void toggleMode() {
   uiDirty = true;
 }
 
-// ===========================================================================
-// ACTIVE MODE: strict lookup-or-ignore key handling
-// ===========================================================================
 void handleActiveModeInput(const Keyboard_Class::KeysState &status) {
   for (char c : status.word) {
     for (int i = 0; i < MAX_SLOTS; i++) {
-      if (!macros[i].special && macros[i].key == (uint8_t)c && macros[i].payload[0] != '\0') {
-        executeMacro(i);
-        break;
-      }
-    }
-  }
-  for (uint8_t code : status.hid_keys) {
-    for (int i = 0; i < MAX_SLOTS; i++) {
-      if (macros[i].special && macros[i].key == code && macros[i].payload[0] != '\0') {
+      if (macros[i].key == (uint8_t)tolower(c) && macros[i].payload[0] != '\0') {
         executeMacro(i);
         break;
       }
@@ -237,21 +170,13 @@ void handleActiveModeInput(const Keyboard_Class::KeysState &status) {
   }
 }
 
-// ===========================================================================
-// Macro execution dispatch
-// ===========================================================================
 void executeMacro(int idx) {
   MacroSlot &m = macros[idx];
   switch (m.type) {
-    case TYPE_RAW_TEXT:     sendRawText(m.payload);     break;
     case TYPE_WIN_RUN:      sendWinRun(m.payload);      break;
     case TYPE_HOTKEY_COMBO: sendHotkeyCombo(m.payload); break;
     default: break;
   }
-}
-
-void sendRawText(const char *payload) {
-  Keyboard.print(payload);
 }
 
 void sendWinRun(const char *payload) {
@@ -288,25 +213,10 @@ void sendHotkeyCombo(const char *payload) {
       Keyboard.press(KEY_LEFT_SHIFT);
     } else if (strcasecmp(token, "ALT") == 0) {
       Keyboard.press(KEY_LEFT_ALT);
-    } else if (strcasecmp(token, "ESC") == 0 || strcasecmp(token, "ESCAPE") == 0) {
-      finalKey = KEY_ESC; finalKeyIsChar = false;
-    } else if (strcasecmp(token, "TAB") == 0) {
-      finalKey = KEY_TAB; finalKeyIsChar = false;
-    } else if (strcasecmp(token, "DEL") == 0 || strcasecmp(token, "DELETE") == 0) {
-      finalKey = KEY_DELETE; finalKeyIsChar = false;
-    } else if (strcasecmp(token, "ENTER") == 0 || strcasecmp(token, "RETURN") == 0) {
-      finalKey = KEY_RETURN; finalKeyIsChar = false;
-    } else if (token[0] == 'F' && isdigit((unsigned char)token[1])) {
-      int fnum = atoi(token + 1);
-      if (fnum >= 1 && fnum <= 12) {
-        finalKey = KEY_F1 + (fnum - 1);
-        finalKeyIsChar = false;
-      }
     } else if (len == 1) {
       finalChar = tolower((unsigned char)token[0]);
       finalKeyIsChar = true;
     }
-
     token = strtok(nullptr, "+");
   }
 
@@ -320,9 +230,6 @@ void sendHotkeyCombo(const char *payload) {
   Keyboard.releaseAll();
 }
 
-// ===========================================================================
-// EDITOR MODE input handling
-// ===========================================================================
 void handleEditorInput(const Keyboard_Class::KeysState &status) {
   if (textEditing) {
     if (status.del) {
@@ -379,7 +286,7 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
       uiDirty = true;
     } else if (status.enter) {
       if (selectedField == FIELD_TYPE) {
-        macros[selectedSlot].type = (macros[selectedSlot].type + 1) % 3;
+        macros[selectedSlot].type = (macros[selectedSlot].type + 1) % 2;
         saveSlot(selectedSlot);
         uiDirty = true;
       } else {
@@ -402,9 +309,6 @@ bool hidKeyPresent(const Keyboard_Class::KeysState &status, uint8_t code) {
   return false;
 }
 
-// ===========================================================================
-// NVS persistence
-// ===========================================================================
 void loadMacros() {
   char keyName[8];
   for (int i = 0; i < MAX_SLOTS; i++) {
@@ -414,9 +318,6 @@ void loadMacros() {
 
       snprintf(keyName, sizeof(keyName), "k%d", i);
       macros[i].key = prefs.getUChar(keyName, macros[i].key);
-
-      snprintf(keyName, sizeof(keyName), "s%d", i);
-      macros[i].special = prefs.getBool(keyName, macros[i].special);
 
       snprintf(keyName, sizeof(keyName), "l%d", i);
       String lbl = prefs.getString(keyName, macros[i].label);
@@ -439,9 +340,6 @@ void saveSlot(int idx) {
   snprintf(keyName, sizeof(keyName), "k%d", idx);
   prefs.putUChar(keyName, macros[idx].key);
 
-  snprintf(keyName, sizeof(keyName), "s%d", idx);
-  prefs.putBool(keyName, macros[idx].special);
-
   snprintf(keyName, sizeof(keyName), "l%d", idx);
   prefs.putString(keyName, macros[idx].label);
 
@@ -449,30 +347,11 @@ void saveSlot(int idx) {
   prefs.putString(keyName, macros[idx].payload);
 }
 
-// ===========================================================================
-// UI rendering
-// ===========================================================================
 const char *typeName(uint8_t type) {
   switch (type) {
-    case TYPE_RAW_TEXT:     return "RAW_TEXT";
     case TYPE_WIN_RUN:      return "WIN_RUN";
     case TYPE_HOTKEY_COMBO: return "HOTKEY";
     default:                return "?";
-  }
-}
-
-const char *keyLabel(const MacroSlot &m, char buf[4]) {
-  if (!m.special) {
-    buf[0] = (char)m.key;
-    buf[1] = '\0';
-    return buf;
-  }
-  switch (m.key) {
-    case HID_KEY_UP:    return "Up";
-    case HID_KEY_DOWN:  return "Dn";
-    case HID_KEY_LEFT:  return "Lt";
-    case HID_KEY_RIGHT: return "Rt";
-    default:            return "??";
   }
 }
 
@@ -482,21 +361,20 @@ void drawActiveModeUI() {
   canvas.fillRect(0, 0, 240, 14, NAVY);
   canvas.setTextColor(WHITE, NAVY);
   canvas.setCursor(4, 3);
-  canvas.print("MACRO KEYBOARD  [ACTIVE]  ESC=Edit");
+  canvas.print("MACRO [ACTIVE]  0=Edit");
 
   canvas.setTextColor(GREENYELLOW, BLACK);
   int y = 18;
   int col = 0;
-  char kbuf[4];
   for (int i = 0; i < MAX_SLOTS; i++) {
     int x = (col == 0) ? 4 : 124;
     canvas.setCursor(x, y);
     if (macros[i].payload[0] != '\0') {
       canvas.setTextColor(WHITE, BLACK);
-      canvas.printf("[%2s] %-9.9s", keyLabel(macros[i], kbuf), macros[i].label);
+      canvas.printf("[%c] %-10.10s", toupper(macros[i].key), macros[i].label);
     } else {
       canvas.setTextColor(DARKGREY, BLACK);
-      canvas.printf("[%2s] --empty--", keyLabel(macros[i], kbuf));
+      canvas.printf("[%c] --empty--", toupper(macros[i].key));
     }
     col++;
     if (col == 2) { col = 0; y += 11; }
@@ -509,10 +387,9 @@ void drawEditorUI() {
   canvas.fillRect(0, 0, 240, 14, MAROON);
   canvas.setTextColor(WHITE, MAROON);
   canvas.setCursor(4, 3);
-  canvas.print("EDITOR MODE    ESC=Exit");
+  canvas.print("EDITOR [Arrows/Enter] 0=Exit");
 
   int y = 18;
-  char kbuf[4];
   for (int i = 0; i < MAX_SLOTS; i++) {
     bool isSel = (editorFocus == FOCUS_LIST) && (i == selectedSlot);
     bool isOpen = (editorFocus == FOCUS_FIELD) && (i == selectedSlot);
@@ -524,7 +401,7 @@ void drawEditorUI() {
     } else {
       canvas.setTextColor(WHITE, BLACK);
     }
-    canvas.printf("[%2s]%-8.8s", keyLabel(macros[i], kbuf),
+    canvas.printf("[%c]%-9.9s", toupper(macros[i].key),
                   macros[i].label[0] ? macros[i].label : "(empty)");
     y += 8;
   }
@@ -571,8 +448,8 @@ void drawEditorUI() {
   } else {
     canvas.setTextColor(LIGHTGREY, BLACK);
     canvas.setCursor(124, 20);
-    canvas.print("Up/Down: select");
+    canvas.print("Up/Dn: select");
     canvas.setCursor(124, 32);
-    canvas.print("Enter/Right: open");
+    canvas.print("Right/Enter: open");
   }
 }
