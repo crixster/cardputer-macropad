@@ -2,28 +2,18 @@
   ============================================================================
   cardputer-macropad.ino
   ============================================================================
-  M5Stack Cardputer (v1.1) -> USB or BLE HID Macro Keyboard & Command Launcher
+  M5Stack Cardputer (v1.1) -> USB HID Macro Keyboard & Command Launcher
   Target host: Windows 11
 
-  FILES (all must sit in the same sketch folder):
-    cardputer-macropad.ino   this file (UI, macros, storage)
-    hid_backend.h            neutral HID interface + MP_KEY_* constants
-    hid_usb.cpp              USB backend (USBHIDKeyboard)
-    hid_ble.cpp              BLE backend (ESP32 BLE Keyboard by T-vK)
+  Turns the Cardputer into a 13-slot macro keyboard. Each slot is bound to a
+  key (default: 1-9, z, x, c, v) and sends one of three kinds of action:
+    RAW_TEXT      types the payload literally (usernames, passwords, snippets)
+    WIN_RUN       Win+R, types the payload, presses Enter (apps, URLs, paths)
+    HOTKEY_COMBO  '+'-separated combo, e.g. "WIN+L" or "CTRL+SHIFT+ESC"
+                  Modifiers: WIN/GUI, CTRL/CONTROL, SHIFT, ALT
+                  Final key: single char, ESC, TAB, ENTER, SPACE, DEL, F1-F12
 
-  WHY THE HID CODE IS IN SEPARATE FILES
-  M5Cardputer.h defines KEY_LEFT_CTRL, KEY_TAB, etc. as macros. BleKeyboard.h
-  declares the same names as real constants, and the USB and BLE libraries
-  also both define a "KeyReport" struct. Each .cpp file is its own
-  compilation unit, so isolating each HID library in its own file (which
-  never includes M5Cardputer.h) makes these conflicts impossible.
-  This file therefore never uses library KEY_* names; it uses MP_KEY_*.
-
-  USB vs BLE
-  One backend per firmware build, chosen by the BUILD_BLE flag:
-    not defined -> USB firmware
-    -DBUILD_BLE -> BLE firmware
-  The GitHub Actions workflow builds both. Flash the .bin you want.
+  Slots are editable on the device and saved to flash (Preferences / NVS).
 
   USAGE
   ACTIVE MODE (default): press a bound key to fire its macro. '0' = editor.
@@ -34,31 +24,17 @@
                Enter on Key/Label/Payload edits text (Enter saves,
                Del removes a char). '0' can be typed while text-editing.
 
-  BLE pairing: Windows 11 -> Settings -> Bluetooth & devices -> Add device
-  -> Bluetooth -> "Cardputer MacroPad". If stuck "not connecting", remove
-  the device in Windows and pair again.
+  Just plug the Cardputer into the PC with a USB-C data cable. No drivers.
 
-  MACRO TYPES
-    RAW_TEXT      types the payload literally.
-    WIN_RUN       Win+R, types the payload, presses Enter.
-    HOTKEY_COMBO  '+'-separated, e.g. "CTRL+SHIFT+ESC", "WIN+L".
-                  Modifiers: WIN/GUI, CTRL/CONTROL, SHIFT, ALT.
-                  Final key: single char, ESC, TAB, ENTER, SPACE, DEL, F1-F12.
-
-  LIBRARIES
-    Always: M5Cardputer
-    BLE build: "ESP32 BLE Keyboard" by T-vK (git install) and optionally
-               NimBLE-Arduino (only used if USE_NIMBLE is defined).
-
-  BOARD SETTINGS: USB Mode "USB-OTG (TinyUSB)", USB CDC On Boot "Enabled".
-  For a local BLE build in the Arduino IDE, add -DBUILD_BLE via arduino-cli:
-    --build-property "compiler.cpp.extra_flags=-DBUILD_BLE"
+  REQUIRED LIBRARY: M5Cardputer (USB/USBHIDKeyboard ship with the ESP32 core)
+  BOARD SETTINGS: USB Mode "USB-OTG (TinyUSB)", USB CDC On Boot "Enabled"
   ============================================================================
 */
 
 #include <M5Cardputer.h>
 #include <Preferences.h>
-#include "hid_backend.h"
+#include <USB.h>
+#include <USBHIDKeyboard.h>
 
 #define STAMP_S3_POWER_HOLD_PIN 38
 
@@ -72,14 +48,12 @@
 #define LABEL_LEN      13
 #define PAYLOAD_LEN    128   // Long enough for URLs and paths
 
-#ifdef HID_BACKEND_BLE
-bool bleWasConnected = false;  // for redraw-on-connect
-#endif
+USBHIDKeyboard usbKeyboard;
 
 enum MacroType : uint8_t {
-  TYPE_RAW_TEXT     = 0,  // Types text directly (usernames/passwords)
-  TYPE_WIN_RUN      = 1,  // Opens Win+R, types command/path, hits Enter
-  TYPE_HOTKEY_COMBO = 2   // Executes hotkey combination (e.g., WIN+L)
+  TYPE_RAW_TEXT     = 0,
+  TYPE_WIN_RUN      = 1,
+  TYPE_HOTKEY_COMBO = 2
 };
 
 struct MacroSlot {
@@ -151,7 +125,8 @@ void setup() {
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
   canvas.setTextSize(1);
 
-  hidBegin();
+  USB.begin();
+  usbKeyboard.begin();
 
   prefs.begin("macrocfg", false);
   loadMacros();
@@ -162,14 +137,6 @@ void setup() {
 
 void loop() {
   M5Cardputer.update();
-
-#ifdef HID_BACKEND_BLE
-  bool nowConnected = hidReady();
-  if (nowConnected != bleWasConnected) {
-    bleWasConnected = nowConnected;
-    uiDirty = true;
-  }
-#endif
 
   if (M5Cardputer.Keyboard.isChange()) {
     if (M5Cardputer.Keyboard.isPressed()) {
@@ -217,7 +184,6 @@ void toggleMode() {
 }
 
 void handleActiveModeInput(const Keyboard_Class::KeysState &status) {
-  if (!hidReady()) return; // BLE not paired yet -- ignore macro keys
   for (char c : status.word) {
     for (int i = 0; i < MAX_SLOTS; i++) {
       if (macros[i].key == (uint8_t)tolower((unsigned char)c) && macros[i].payload[0] != '\0') {
@@ -239,18 +205,18 @@ void executeMacro(int idx) {
 }
 
 void sendRawText(const char *payload) {
-  hidPrint(payload);
+  usbKeyboard.print(payload);
 }
 
 void sendWinRun(const char *payload) {
-  hidPress(MP_KEY_LEFT_GUI);
-  hidPress((uint8_t)'r');
+  usbKeyboard.press(KEY_LEFT_GUI);
+  usbKeyboard.press('r');
   delay(40);
-  hidReleaseAll();
+  usbKeyboard.releaseAll();
   delay(120);
-  hidPrint(payload);
+  usbKeyboard.print(payload);
   delay(40);
-  hidWriteEnter();
+  usbKeyboard.write(KEY_RETURN);
 }
 
 // Modifiers plus ESC/TAB/ENTER/SPACE/DEL/F1-F12 are recognised as the final
@@ -270,27 +236,27 @@ void sendHotkeyCombo(const char *payload) {
     while (len > 0 && token[len - 1] == ' ') { token[len - 1] = '\0'; len--; }
 
     if (strcasecmp(token, "WIN") == 0 || strcasecmp(token, "GUI") == 0) {
-      hidPress(MP_KEY_LEFT_GUI);
+      usbKeyboard.press(KEY_LEFT_GUI);
     } else if (strcasecmp(token, "CTRL") == 0 || strcasecmp(token, "CONTROL") == 0) {
-      hidPress(MP_KEY_LEFT_CTRL);
+      usbKeyboard.press(KEY_LEFT_CTRL);
     } else if (strcasecmp(token, "SHIFT") == 0) {
-      hidPress(MP_KEY_LEFT_SHIFT);
+      usbKeyboard.press(KEY_LEFT_SHIFT);
     } else if (strcasecmp(token, "ALT") == 0) {
-      hidPress(MP_KEY_LEFT_ALT);
+      usbKeyboard.press(KEY_LEFT_ALT);
     } else if (strcasecmp(token, "ESC") == 0 || strcasecmp(token, "ESCAPE") == 0) {
-      finalCode = MP_KEY_ESC;      haveFinal = true;
+      finalCode = KEY_ESC;      haveFinal = true;
     } else if (strcasecmp(token, "TAB") == 0) {
-      finalCode = MP_KEY_TAB;      haveFinal = true;
+      finalCode = KEY_TAB;      haveFinal = true;
     } else if (strcasecmp(token, "ENTER") == 0 || strcasecmp(token, "RETURN") == 0) {
-      finalCode = MP_KEY_RETURN;   haveFinal = true;
+      finalCode = KEY_RETURN;   haveFinal = true;
     } else if (strcasecmp(token, "SPACE") == 0) {
-      finalCode = (uint8_t)' ';    haveFinal = true;
+      finalCode = (uint8_t)' '; haveFinal = true;
     } else if (strcasecmp(token, "DEL") == 0 || strcasecmp(token, "DELETE") == 0) {
-      finalCode = MP_KEY_DELETE;   haveFinal = true;
+      finalCode = KEY_DELETE;   haveFinal = true;
     } else if ((token[0] == 'F' || token[0] == 'f') && len >= 2 && isdigit((unsigned char)token[1])) {
       int n = atoi(token + 1);
       if (n >= 1 && n <= 12) {
-        finalCode = (uint8_t)(MP_KEY_F1 + (n - 1));
+        finalCode = KEY_F1 + (n - 1);
         haveFinal = true;
       }
     } else if (len == 1) {
@@ -301,11 +267,11 @@ void sendHotkeyCombo(const char *payload) {
   }
 
   if (haveFinal) {
-    hidPress(finalCode);
+    usbKeyboard.press(finalCode);
   }
 
   delay(50);
-  hidReleaseAll();
+  usbKeyboard.releaseAll();
 }
 
 void handleEditorInput(const Keyboard_Class::KeysState &status) {
@@ -460,13 +426,8 @@ void drawActiveModeUI() {
   canvas.fillRect(0, 0, 240, 14, NAVY);
   canvas.setTextColor(WHITE, NAVY);
   canvas.setCursor(4, 3);
-#ifdef HID_BACKEND_USB
   canvas.print("MACRO [ACTIVE] USB  0=Edit");
-#else
-  canvas.printf("MACRO [ACTIVE] BLE:%s 0=Edit", hidReady() ? "OK" : "...");
-#endif
 
-  canvas.setTextColor(GREENYELLOW, BLACK);
   int y = 18;
   int col = 0;
   for (int i = 0; i < MAX_SLOTS; i++) {
@@ -482,14 +443,6 @@ void drawActiveModeUI() {
     col++;
     if (col == 2) { col = 0; y += 11; }
   }
-
-#ifdef HID_BACKEND_BLE
-  if (!hidReady()) {
-    canvas.setTextColor(ORANGE, BLACK);
-    canvas.setCursor(4, 122);
-    canvas.print("Waiting for BLE pairing...");
-  }
-#endif
 }
 
 void drawEditorUI() {
@@ -573,10 +526,6 @@ void drawEditorUI() {
     canvas.setCursor(124, 32);
     canvas.print("Right/Enter: open");
     canvas.setCursor(124, 48);
-#ifdef HID_BACKEND_USB
     canvas.print("Build: USB");
-#else
-    canvas.print("Build: BLE");
-#endif
   }
 }
