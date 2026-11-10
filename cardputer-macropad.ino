@@ -35,6 +35,9 @@
 #include <Preferences.h>
 #include <USB.h>
 #include <USBHIDKeyboard.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 
 #define STAMP_S3_POWER_HOLD_PIN 38
 
@@ -118,6 +121,160 @@ bool isDelKey(const Keyboard_Class::KeysState &status);
 NavKey readNav(const Keyboard_Class::KeysState &status);
 const char *typeName(uint8_t type);
 
+// ============================================================================
+// REMOTE LINK (ESP-NOW) -- accepts triggers ONLY from the paired M5StickS3.
+// Frames are encrypted and filtered by sender MAC.
+// ============================================================================
+// >>> Put the M5StickS3's MAC address here (shown on the stick's screen). <<<
+static const uint8_t PEER_MAC[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+// Shared keys -- MUST be identical on the stick. Exactly 16 characters each.
+static const char LINK_PMK[17] = "MacroPadPMK_2026";
+static const char LINK_LMK[17] = "MacroPadLMK_2026";
+
+#define LINK_MAGIC 0x4D50524DUL
+enum LinkType : uint8_t { MSG_TRIGGER = 1, MSG_SYNC_REQ = 2, MSG_SLOT_INFO = 3, MSG_ACK = 4 };
+
+// Keep this struct IDENTICAL in the stick sketch.
+struct __attribute__((packed)) LinkMsg {
+  uint32_t magic;
+  uint8_t  type;
+  uint8_t  slot;
+  uint8_t  flags;            // SLOT_INFO: bit0 = slot has a payload. ACK: bit0 = executed OK
+  uint8_t  seq;
+  char     key;              // SLOT_INFO: trigger key
+  char     label[LABEL_LEN]; // SLOT_INFO: label
+};
+
+volatile int     linkPendingSlot   = -1;
+volatile uint8_t linkPendingSeq    = 0;
+volatile bool    linkSyncRequested = false;
+bool     linkReady = false;
+uint8_t  ownMac[6] = {0};
+char     linkStatus[28] = "";
+uint32_t linkStatusUntil = 0;
+
+bool linkPeerConfigured();
+void linkHandle(const uint8_t *mac, const uint8_t *data, int len);
+void linkBegin();
+void linkSend(uint8_t type, uint8_t slot, uint8_t flags, uint8_t seq);
+void linkSendSlotInfo(int idx);
+void linkSendAllSlots();
+void linkLoop();
+
+bool linkPeerConfigured() {
+  for (int i = 0; i < 6; i++) if (PEER_MAC[i] != 0) return true;
+  return false;
+}
+
+// Runs in the WiFi task: only record the request, never touch HID here.
+void linkHandle(const uint8_t *mac, const uint8_t *data, int len) {
+  if (len != (int)sizeof(LinkMsg)) return;
+  if (memcmp(mac, PEER_MAC, 6) != 0) return;       // not our stick -> drop
+  LinkMsg m;
+  memcpy(&m, data, sizeof(m));
+  if (m.magic != LINK_MAGIC) return;
+
+  if (m.type == MSG_TRIGGER && m.slot < MAX_SLOTS) {
+    linkPendingSeq  = m.seq;
+    linkPendingSlot = m.slot;
+  } else if (m.type == MSG_SYNC_REQ) {
+    linkSyncRequested = true;
+  }
+}
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+void linkOnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  linkHandle(info->src_addr, data, len);
+}
+#else
+void linkOnRecv(const uint8_t *mac, const uint8_t *data, int len) {
+  linkHandle(mac, data, len);
+}
+#endif
+
+void linkBegin() {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  WiFi.macAddress(ownMac);
+
+  if (!linkPeerConfigured()) return;
+  if (esp_now_init() != ESP_OK) return;
+  esp_now_set_pmk((const uint8_t *)LINK_PMK);
+
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, PEER_MAC, 6);
+  peer.channel = 1;
+  peer.ifidx   = WIFI_IF_STA;
+  peer.encrypt = true;
+  memcpy(peer.lmk, LINK_LMK, 16);
+  if (esp_now_add_peer(&peer) != ESP_OK) return;
+
+  esp_now_register_recv_cb(linkOnRecv);
+  linkReady = true;
+}
+
+void linkSend(uint8_t type, uint8_t slot, uint8_t flags, uint8_t seq) {
+  if (!linkReady) return;
+  LinkMsg m;
+  memset(&m, 0, sizeof(m));
+  m.magic = LINK_MAGIC;
+  m.type  = type;
+  m.slot  = slot;
+  m.seq   = seq;
+  m.flags = flags;
+  if (type == MSG_SLOT_INFO && slot < MAX_SLOTS) {
+    m.key = (char)macros[slot].key;
+    strncpy(m.label, macros[slot].label, LABEL_LEN - 1);
+    if (macros[slot].payload[0] != '\0') m.flags |= 1;
+  }
+  esp_now_send(PEER_MAC, (const uint8_t *)&m, sizeof(m));
+}
+
+void linkSendSlotInfo(int idx)  { linkSend(MSG_SLOT_INFO, (uint8_t)idx, 0, 0); }
+
+void linkSendAllSlots() {
+  for (int i = 0; i < MAX_SLOTS; i++) {
+    linkSendSlotInfo(i);
+    delay(8);
+  }
+}
+
+// Called from loop(): runs requested work on the main task.
+void linkLoop() {
+  if (!linkReady) return;
+
+  if (linkSyncRequested) {
+    linkSyncRequested = false;
+    linkSendAllSlots();
+  }
+
+  int slot = linkPendingSlot;
+  if (slot >= 0) {
+    linkPendingSlot = -1;
+    uint8_t seq = linkPendingSeq;
+    bool ok = (appMode == MODE_ACTIVE) && (slot < MAX_SLOTS) && (macros[slot].payload[0] != '\0');
+
+    linkSend(MSG_ACK, (uint8_t)slot, ok ? 1 : 0, seq);   // ack first, then type
+
+    if (ok) {
+      snprintf(linkStatus, sizeof(linkStatus), "Remote: %.12s", macros[slot].label);
+      executeMacro(slot);
+    } else {
+      snprintf(linkStatus, sizeof(linkStatus), "Remote ignored (busy)");
+    }
+    linkStatusUntil = millis() + 3000;
+    uiDirty = true;
+  }
+
+  if (linkStatusUntil && millis() > linkStatusUntil) {
+    linkStatusUntil = 0;
+    linkStatus[0] = '\0';
+    uiDirty = true;
+  }
+}
+
 void setup() {
   pinMode(STAMP_S3_POWER_HOLD_PIN, OUTPUT);
   digitalWrite(STAMP_S3_POWER_HOLD_PIN, HIGH);
@@ -145,6 +302,7 @@ void setup() {
 
   prefs.begin("macrocfg", false);
   loadMacros();
+  linkBegin();
 
   appMode = MODE_ACTIVE;
   uiDirty = true;
@@ -152,6 +310,7 @@ void setup() {
 
 void loop() {
   M5Cardputer.update();
+  linkLoop();
 
   if (M5Cardputer.Keyboard.isChange()) {
     if (M5Cardputer.Keyboard.isPressed()) {
@@ -464,6 +623,8 @@ void saveSlot(int idx) {
 
   snprintf(keyName, sizeof(keyName), "p%d", idx);
   prefs.putString(keyName, macros[idx].payload);
+
+  linkSendSlotInfo(idx);   // keep the stick's list in sync
 }
 
 const char *typeName(uint8_t type) {
@@ -482,6 +643,8 @@ void drawActiveModeUI() {
   canvas.setTextColor(WHITE, NAVY);
   canvas.setCursor(4, 3);
   canvas.print("MACRO [ACTIVE] USB  0=Edit");
+  canvas.setCursor(200, 3);
+  canvas.print(linkReady ? "RF:ok" : "RF:--");
 
   int y = 18;
   int col = 0;
@@ -497,6 +660,12 @@ void drawActiveModeUI() {
     }
     col++;
     if (col == 2) { col = 0; y += 11; }
+  }
+
+  if (linkStatus[0]) {
+    canvas.setTextColor(GREENYELLOW, BLACK);
+    canvas.setCursor(4, 122);
+    canvas.print(linkStatus);
   }
 }
 
@@ -582,6 +751,16 @@ void drawEditorUI() {
     canvas.print("Right/Enter: open");
     canvas.setCursor(124, 48);
     canvas.print("Build: USB");
+
+    char macStr[20];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             ownMac[0], ownMac[1], ownMac[2], ownMac[3], ownMac[4], ownMac[5]);
+    canvas.setCursor(124, 64);
+    canvas.print("My MAC:");
+    canvas.setCursor(124, 74);
+    canvas.print(macStr);
+    canvas.setCursor(124, 88);
+    canvas.print(linkReady ? "Remote: ready" : "Remote: NO PEER");
   }
 
   // Key debug line (shows what the keyboard reports). Delete if not wanted.
