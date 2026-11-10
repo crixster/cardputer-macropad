@@ -41,7 +41,7 @@
 #define VISIBLE_ROWS 5
 
 // >>> Put the CARDPUTER's MAC address here (shown on the Cardputer screen). <<<
-static const uint8_t PEER_MAC[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+static const uint8_t PEER_MAC[6] = { 0xB0, 0x81, 0x84, 0x96, 0xA7, 0x0C };
 
 // Shared keys -- MUST be identical on the Cardputer. Exactly 16 characters.
 static const char LINK_PMK[17] = "MacroPadPMK_2026";
