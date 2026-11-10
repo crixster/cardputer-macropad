@@ -97,6 +97,9 @@ char        editBuffer[PAYLOAD_LEN];
 size_t      editBufferLen  = 0;
 bool        uiDirty        = true;
 
+enum NavKey { NAV_NONE, NAV_UP, NAV_DOWN, NAV_LEFT, NAV_RIGHT, NAV_ENTER };
+char dbgLine[48] = "";
+
 void loadMacros();
 void saveSlot(int idx);
 void drawActiveModeUI();
@@ -109,6 +112,10 @@ void sendWinRun(const char *payload);
 void sendHotkeyCombo(const char *payload);
 void toggleMode();
 bool hidKeyPresent(const Keyboard_Class::KeysState &status, uint8_t code);
+bool wordHas(const Keyboard_Class::KeysState &status, char ch);
+bool isEnterKey(const Keyboard_Class::KeysState &status);
+bool isDelKey(const Keyboard_Class::KeysState &status);
+NavKey readNav(const Keyboard_Class::KeysState &status);
 const char *typeName(uint8_t type);
 
 void setup() {
@@ -118,7 +125,15 @@ void setup() {
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
 
-  M5Cardputer.Display.setRotation(1);
+  // Pick a rotation that is actually landscape (wider than tall), instead of
+  // assuming rotation 1 is landscape on every M5GFX version.
+  {
+    const uint8_t tryOrder[4] = {1, 3, 0, 2};
+    for (uint8_t r : tryOrder) {
+      M5Cardputer.Display.setRotation(r);
+      if (M5Cardputer.Display.width() > M5Cardputer.Display.height()) break;
+    }
+  }
   M5Cardputer.Display.setBrightness(80);
 
   canvas.setColorDepth(8);
@@ -141,6 +156,12 @@ void loop() {
   if (M5Cardputer.Keyboard.isChange()) {
     if (M5Cardputer.Keyboard.isPressed()) {
       Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+
+      snprintf(dbgLine, sizeof(dbgLine), "en%d de%d fn%d h:%02X w:%c",
+               (int)status.enter, (int)status.del, (int)status.fn,
+               status.hid_keys.empty() ? 0 : status.hid_keys[0],
+               status.word.empty() ? '-' : status.word[0]);
+      uiDirty = true;
 
       bool hitZero = false;
       for (char c : status.word) {
@@ -275,8 +296,10 @@ void sendHotkeyCombo(const char *payload) {
 }
 
 void handleEditorInput(const Keyboard_Class::KeysState &status) {
+  NavKey nav = readNav(status);
+
   if (textEditing) {
-    if (status.del) {
+    if (isDelKey(status)) {
       if (editBufferLen > 0) {
         editBufferLen--;
         editBuffer[editBufferLen] = '\0';
@@ -284,7 +307,7 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
       }
       return;
     }
-    if (status.enter) {
+    if (isEnterKey(status)) {
       if (selectedField == FIELD_KEY) {
         if (editBufferLen > 0) {
           macros[selectedSlot].key = (uint8_t)tolower((unsigned char)editBuffer[0]);
@@ -306,6 +329,7 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
                     : (selectedField == FIELD_LABEL) ? (LABEL_LEN - 1)
                                                       : (PAYLOAD_LEN - 1);
     for (char c : status.word) {
+      if (c == '\n' || c == '\r') continue;
       if (selectedField == FIELD_KEY) {
         editBuffer[0] = c;
         editBuffer[1] = '\0';
@@ -321,28 +345,28 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
   }
 
   if (editorFocus == FOCUS_LIST) {
-    if (hidKeyPresent(status, HID_KEY_UP)) {
+    if (nav == NAV_UP) {
       selectedSlot = (selectedSlot - 1 + MAX_SLOTS) % MAX_SLOTS;
       uiDirty = true;
-    } else if (hidKeyPresent(status, HID_KEY_DOWN)) {
+    } else if (nav == NAV_DOWN) {
       selectedSlot = (selectedSlot + 1) % MAX_SLOTS;
       uiDirty = true;
-    } else if (status.enter || hidKeyPresent(status, HID_KEY_RIGHT)) {
+    } else if (nav == NAV_ENTER || nav == NAV_RIGHT) {
       editorFocus = FOCUS_FIELD;
       selectedField = FIELD_TYPE;
       uiDirty = true;
     }
   } else {
-    if (hidKeyPresent(status, HID_KEY_LEFT)) {
+    if (nav == NAV_LEFT) {
       editorFocus = FOCUS_LIST;
       uiDirty = true;
-    } else if (hidKeyPresent(status, HID_KEY_UP)) {
+    } else if (nav == NAV_UP) {
       selectedField = (selectedField - 1 + FIELD_COUNT) % FIELD_COUNT;
       uiDirty = true;
-    } else if (hidKeyPresent(status, HID_KEY_DOWN)) {
+    } else if (nav == NAV_DOWN) {
       selectedField = (selectedField + 1) % FIELD_COUNT;
       uiDirty = true;
-    } else if (status.enter) {
+    } else if (nav == NAV_ENTER) {
       if (selectedField == FIELD_TYPE) {
         macros[selectedSlot].type = (macros[selectedSlot].type + 1) % 3;
         saveSlot(selectedSlot);
@@ -371,6 +395,37 @@ bool hidKeyPresent(const Keyboard_Class::KeysState &status, uint8_t code) {
     if (k == code) return true;
   }
   return false;
+}
+
+bool wordHas(const Keyboard_Class::KeysState &status, char ch) {
+  for (char c : status.word) {
+    if (c == ch) return true;
+  }
+  return false;
+}
+
+// Enter / Delete are detected several ways because the flags and HID lists
+// differ between M5Cardputer library versions.
+bool isEnterKey(const Keyboard_Class::KeysState &status) {
+  return status.enter || hidKeyPresent(status, 0x28) || hidKeyPresent(status, 0x58) ||
+         wordHas(status, '\n') || wordHas(status, '\r');
+}
+
+bool isDelKey(const Keyboard_Class::KeysState &status) {
+  return status.del || hidKeyPresent(status, 0x2A) ||
+         wordHas(status, '\b') || wordHas(status, 127);
+}
+
+// Navigation: real arrow HID codes (Fn+arrow keys) OR the unshifted
+// ; . , / keys that carry the arrow legends on the Cardputer.
+//   ; = Up    . = Down    , = Left    / = Right
+NavKey readNav(const Keyboard_Class::KeysState &status) {
+  if (hidKeyPresent(status, HID_KEY_UP)    || wordHas(status, ';')) return NAV_UP;
+  if (hidKeyPresent(status, HID_KEY_DOWN)  || wordHas(status, '.')) return NAV_DOWN;
+  if (hidKeyPresent(status, HID_KEY_LEFT)  || wordHas(status, ',')) return NAV_LEFT;
+  if (hidKeyPresent(status, HID_KEY_RIGHT) || wordHas(status, '/')) return NAV_RIGHT;
+  if (isEnterKey(status)) return NAV_ENTER;
+  return NAV_NONE;
 }
 
 void loadMacros() {
@@ -528,4 +583,9 @@ void drawEditorUI() {
     canvas.setCursor(124, 48);
     canvas.print("Build: USB");
   }
+
+  // Key debug line (shows what the keyboard reports). Delete if not wanted.
+  canvas.setTextColor(DARKGREY, BLACK);
+  canvas.setCursor(4, 125);
+  canvas.print(dbgLine);
 }
