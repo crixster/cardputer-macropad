@@ -5,6 +5,12 @@
   M5Stack Cardputer (v1.1) -> USB HID Macro Keyboard & Command Launcher
   Target host: Windows 11
   MCU: ESP32-S3 (Stamp-S3), 240x135 TFT, 56-key matrix keyboard
+
+  BOARD SETTINGS (Arduino IDE, required for USBHIDKeyboard to even compile):
+    Tools -> USB Mode: "USB-OTG (TinyUSB)"
+    Tools -> USB CDC On Boot: "Enabled"
+  If these aren't set correctly for an ESP32-S3 target, USB.h / USBHIDKeyboard.h
+  will fail to resolve and you'll get undeclared-identifier errors at compile time.
   ============================================================================
 */
 
@@ -22,7 +28,7 @@
 #define HID_KEY_RIGHT  0x4F
 
 #define MAX_SLOTS      13
-#define LABEL_LEN      13   
+#define LABEL_LEN      13
 #define PAYLOAD_LEN    128   // Increased to support long URLs and paths
 
 enum MacroType : uint8_t {
@@ -32,11 +38,11 @@ enum MacroType : uint8_t {
 };
 
 struct MacroSlot {
-  bool    special;              
-  uint8_t key;                  
-  uint8_t type;                 
-  char    label[LABEL_LEN];     
-  char    payload[PAYLOAD_LEN]; 
+  bool    special;
+  uint8_t key;
+  uint8_t type;
+  char    label[LABEL_LEN];
+  char    payload[PAYLOAD_LEN];
 };
 
 MacroSlot macros[MAX_SLOTS] = {
@@ -63,15 +69,16 @@ enum AppMode { MODE_ACTIVE, MODE_EDITOR };
 AppMode appMode = MODE_ACTIVE;
 
 enum EditorFocus { FOCUS_LIST, FOCUS_FIELD };
-enum EditorField  { FIELD_TYPE = 0, FIELD_LABEL = 1, FIELD_PAYLOAD = 2, FIELD_COUNT = 3 };
+// Added FIELD_KEY so the trigger key itself can be rebound from the editor.
+enum EditorField  { FIELD_TYPE = 0, FIELD_LABEL = 1, FIELD_PAYLOAD = 2, FIELD_KEY = 3, FIELD_COUNT = 4 };
 
 EditorFocus editorFocus    = FOCUS_LIST;
 int         selectedSlot   = 0;
 int         selectedField  = FIELD_TYPE;
-bool        textEditing    = false;      
-char        editBuffer[PAYLOAD_LEN];    
-size_t      editBufferLen = 0;
-bool        uiDirty        = true;       
+bool        textEditing    = false;
+char        editBuffer[PAYLOAD_LEN];
+size_t      editBufferLen  = 0;
+bool        uiDirty        = true;
 
 void loadMacros();
 void saveSlot(int idx);
@@ -86,6 +93,7 @@ void sendHotkeyCombo(const char *payload);
 void toggleMode();
 bool hidKeyPresent(const Keyboard_Class::KeysState &status, uint8_t code);
 const char *typeName(uint8_t type);
+const char *fieldName(int field);
 
 void setup() {
   pinMode(STAMP_S3_POWER_HOLD_PIN, OUTPUT);
@@ -93,7 +101,7 @@ void setup() {
 
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
-  
+
   M5Cardputer.Display.setRotation(3);
   M5Cardputer.Display.setBrightness(80);
 
@@ -123,7 +131,9 @@ void loop() {
         if (c == '0') { hitZero = true; break; }
       }
 
-      if (hitZero) {
+      // Don't let '0' toggle mode while the user is actively typing text into
+      // a field — otherwise they can never type a literal '0' into a payload.
+      if (hitZero && !(appMode == MODE_EDITOR && textEditing)) {
         toggleMode();
       } else if (appMode == MODE_ACTIVE) {
         handleActiveModeInput(status);
@@ -161,7 +171,7 @@ void toggleMode() {
 void handleActiveModeInput(const Keyboard_Class::KeysState &status) {
   for (char c : status.word) {
     for (int i = 0; i < MAX_SLOTS; i++) {
-      if (macros[i].key == (uint8_t)tolower(c) && macros[i].payload[0] != '\0') {
+      if (macros[i].key == (uint8_t)tolower((unsigned char)c) && macros[i].payload[0] != '\0') {
         executeMacro(i);
         break;
       }
@@ -188,12 +198,15 @@ void sendWinRun(const char *payload) {
   Keyboard.press('r');
   delay(40);
   Keyboard.releaseAll();
-  delay(120); 
+  delay(120);
   Keyboard.print(payload);
   delay(40);
   Keyboard.write(KEY_RETURN);
 }
 
+// Fixed: now recognizes common named keys (ESC, TAB, ENTER, SPACE, DEL, F1-F12)
+// in addition to single characters, so combos like "CTRL+SHIFT+ESC" actually
+// send the final key instead of silently dropping it.
 void sendHotkeyCombo(const char *payload) {
   char buf[PAYLOAD_LEN];
   strncpy(buf, payload, sizeof(buf));
@@ -201,8 +214,8 @@ void sendHotkeyCombo(const char *payload) {
 
   char *token = strtok(buf, "+");
   uint8_t finalKey = 0;
-  bool finalKeyIsChar = false;
-  char finalChar = 0;
+  bool    finalKeyIsChar = false;
+  char    finalChar = 0;
 
   while (token != nullptr) {
     while (*token == ' ') token++;
@@ -217,6 +230,27 @@ void sendHotkeyCombo(const char *payload) {
       Keyboard.press(KEY_LEFT_SHIFT);
     } else if (strcasecmp(token, "ALT") == 0) {
       Keyboard.press(KEY_LEFT_ALT);
+    } else if (strcasecmp(token, "ESC") == 0 || strcasecmp(token, "ESCAPE") == 0) {
+      finalKey = KEY_ESC;
+      finalKeyIsChar = false;
+    } else if (strcasecmp(token, "TAB") == 0) {
+      finalKey = KEY_TAB;
+      finalKeyIsChar = false;
+    } else if (strcasecmp(token, "ENTER") == 0 || strcasecmp(token, "RETURN") == 0) {
+      finalKey = KEY_RETURN;
+      finalKeyIsChar = false;
+    } else if (strcasecmp(token, "SPACE") == 0) {
+      finalChar = ' ';
+      finalKeyIsChar = true;
+    } else if (strcasecmp(token, "DEL") == 0 || strcasecmp(token, "DELETE") == 0) {
+      finalKey = KEY_DELETE;
+      finalKeyIsChar = false;
+    } else if ((token[0] == 'F' || token[0] == 'f') && len >= 2 && isdigit((unsigned char)token[1])) {
+      int n = atoi(token + 1);
+      if (n >= 1 && n <= 12) {
+        finalKey = KEY_F1 + (n - 1);
+        finalKeyIsChar = false;
+      }
     } else if (len == 1) {
       finalChar = tolower((unsigned char)token[0]);
       finalKeyIsChar = true;
@@ -245,19 +279,35 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
       return;
     }
     if (status.enter) {
-      char *dest = (selectedField == FIELD_LABEL) ? macros[selectedSlot].label
-                                                   : macros[selectedSlot].payload;
-      size_t destCap = (selectedField == FIELD_LABEL) ? LABEL_LEN : PAYLOAD_LEN;
-      strncpy(dest, editBuffer, destCap - 1);
-      dest[destCap - 1] = '\0';
+      if (selectedField == FIELD_KEY) {
+        if (editBufferLen > 0) {
+          macros[selectedSlot].key = (uint8_t)tolower((unsigned char)editBuffer[0]);
+        }
+      } else {
+        char *dest = (selectedField == FIELD_LABEL) ? macros[selectedSlot].label
+                                                     : macros[selectedSlot].payload;
+        size_t destCap = (selectedField == FIELD_LABEL) ? LABEL_LEN : PAYLOAD_LEN;
+        strncpy(dest, editBuffer, destCap - 1);
+        dest[destCap - 1] = '\0';
+      }
       saveSlot(selectedSlot);
       textEditing = false;
       uiDirty = true;
       return;
     }
-    size_t destCap = (selectedField == FIELD_LABEL) ? (LABEL_LEN - 1) : (PAYLOAD_LEN - 1);
+
+    // FIELD_KEY only ever holds a single character.
+    size_t destCap = (selectedField == FIELD_KEY)    ? 1
+                    : (selectedField == FIELD_LABEL)  ? (LABEL_LEN - 1)
+                                                       : (PAYLOAD_LEN - 1);
     for (char c : status.word) {
-      if (editBufferLen < destCap) {
+      if (selectedField == FIELD_KEY) {
+        // Always overwrite, never accumulate, for a single-char field.
+        editBuffer[0] = c;
+        editBuffer[1] = '\0';
+        editBufferLen = 1;
+        uiDirty = true;
+      } else if (editBufferLen < destCap) {
         editBuffer[editBufferLen++] = c;
         editBuffer[editBufferLen] = '\0';
         uiDirty = true;
@@ -292,6 +342,12 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
       if (selectedField == FIELD_TYPE) {
         macros[selectedSlot].type = (macros[selectedSlot].type + 1) % 3;
         saveSlot(selectedSlot);
+        uiDirty = true;
+      } else if (selectedField == FIELD_KEY) {
+        textEditing = true;
+        editBuffer[0] = (char)macros[selectedSlot].key;
+        editBuffer[1] = '\0';
+        editBufferLen = 1;
         uiDirty = true;
       } else {
         textEditing = true;
@@ -360,6 +416,16 @@ const char *typeName(uint8_t type) {
   }
 }
 
+const char *fieldName(int field) {
+  switch (field) {
+    case FIELD_TYPE:    return "Type";
+    case FIELD_LABEL:   return "Lbl";
+    case FIELD_PAYLOAD: return "Pay";
+    case FIELD_KEY:     return "Key";
+    default:             return "?";
+  }
+}
+
 void drawActiveModeUI() {
   canvas.fillSprite(BLACK);
 
@@ -396,7 +462,7 @@ void drawEditorUI() {
 
   int y = 18;
   for (int i = 0; i < MAX_SLOTS; i++) {
-    bool isSel = (editorFocus == FOCUS_LIST) && (i == selectedSlot);
+    bool isSel  = (editorFocus == FOCUS_LIST)  && (i == selectedSlot);
     bool isOpen = (editorFocus == FOCUS_FIELD) && (i == selectedSlot);
     canvas.setCursor(4, y);
     if (isSel) {
@@ -415,12 +481,25 @@ void drawEditorUI() {
     canvas.drawRect(120, 16, 118, 118, DARKGREY);
     int fy = 20;
 
+    // Key field
+    canvas.setTextColor(selectedField == FIELD_KEY ? BLACK : WHITE,
+                       selectedField == FIELD_KEY ? ORANGE : BLACK);
+    canvas.setCursor(124, fy);
+    if (textEditing && selectedField == FIELD_KEY) {
+      canvas.printf("Key:%c_", editBuffer[0] ? toupper(editBuffer[0]) : ' ');
+    } else {
+      canvas.printf("Key:%c", toupper(macros[selectedSlot].key));
+    }
+    fy += 14;
+
+    // Type field
     canvas.setTextColor(selectedField == FIELD_TYPE ? BLACK : WHITE,
                        selectedField == FIELD_TYPE ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
-    canvas.printf("Type: %s", typeName(macros[selectedSlot].type));
+    canvas.printf("Type:%s", typeName(macros[selectedSlot].type));
     fy += 14;
 
+    // Label field
     canvas.setTextColor(selectedField == FIELD_LABEL ? BLACK : WHITE,
                        selectedField == FIELD_LABEL ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
@@ -431,6 +510,7 @@ void drawEditorUI() {
     }
     fy += 14;
 
+    // Payload field
     canvas.setTextColor(selectedField == FIELD_PAYLOAD ? BLACK : WHITE,
                        selectedField == FIELD_PAYLOAD ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
@@ -448,7 +528,7 @@ void drawEditorUI() {
     } else if (selectedField == FIELD_TYPE) {
       canvas.print("ENTER=cycle type");
     } else {
-      canvas.print("ENTER=edit text");
+      canvas.print("ENTER=edit");
     }
   } else {
     canvas.setTextColor(LIGHTGREY, BLACK);
