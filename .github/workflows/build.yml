@@ -17,38 +17,23 @@ jobs:
         run: |
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli config set library.enable_unsafe_install true
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
           arduino-cli lib install M5Cardputer
-          arduino-cli lib install --git-url https://github.com/T-vK/ESP32-BLE-Keyboard.git
 
       - name: Prepare Sketch Structure
         run: |
           mkdir -p cardputer-macropad
-          mv cardputer-macropad.ino hid_backend.h hid_usb.cpp hid_ble.cpp cardputer-macropad/
+          mv cardputer-macropad.ino cardputer-macropad/
 
       - name: Compile USB Firmware
         run: |
-          arduino-cli compile --clean \
+          arduino-cli compile \
             --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=default \
             --output-dir build-usb cardputer-macropad
-
-      - name: Compile BLE Firmware
-        run: |
-          arduino-cli compile --clean \
-            --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=default \
-            --build-property "compiler.cpp.extra_flags=-DBUILD_BLE" \
-            --output-dir build-ble cardputer-macropad
 
       - name: Upload USB Firmware
         uses: actions/upload-artifact@v4
         with:
           name: cardputer-macropad-usb-firmware
           path: 'build-usb/**/*.bin'
-
-      - name: Upload BLE Firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: cardputer-macropad-ble-firmware
-          path: 'build-ble/**/*.bin'
