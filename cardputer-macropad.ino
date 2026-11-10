@@ -2,21 +2,44 @@
   ============================================================================
   CardputerMacroPad.ino
   ============================================================================
-  M5Stack Cardputer (v1.1) -> USB HID Macro Keyboard & Command Launcher
+  M5Stack Cardputer (v1.1) -> USB or BLE HID Macro Keyboard & Command Launcher
   Target host: Windows 11
   MCU: ESP32-S3 (Stamp-S3), 240x135 TFT, 56-key matrix keyboard
 
-  BOARD SETTINGS (Arduino IDE, required for USBHIDKeyboard to even compile):
+  CONNECTION MODE
+    Two mutually exclusive HID backends: USB (wired) and BLE (wireless).
+    The active mode is stored in flash (Preferences) and only ONE backend is
+    ever initialized per boot -- switching modes writes the new setting and
+    reboots the device so it comes up clean in the new mode. This is
+    deliberate: hot-swapping the TinyUSB stack and the BLE stack within a
+    single running session is not reliably supported on ESP32-S3 Arduino, so
+    "pick mode -> save -> restart" is the robust way to get a clean switch.
+
+    From the EDITOR screen's slot list (FOCUS_LIST, not while text-editing),
+    press 'M' to toggle USB <-> BLE. You'll get a confirm screen, then it
+    reboots.
+
+  REQUIRED LIBRARIES
+    - M5Cardputer / M5Unified / M5GFX (as before)
+    - "ESP32 BLE Keyboard" by T-vK (Library Manager search: ESP32 BLE Keyboard)
+      -> pulls in NimBLE-Arduino automatically as a dependency.
+
+  BOARD SETTINGS (Arduino IDE)
     Tools -> USB Mode: "USB-OTG (TinyUSB)"
     Tools -> USB CDC On Boot: "Enabled"
-  If these aren't set correctly for an ESP32-S3 target, USB.h / USBHIDKeyboard.h
-  will fail to resolve and you'll get undeclared-identifier errors at compile time.
+  Required for USBHIDKeyboard to resolve/compile on ESP32-S3 targets.
+
+  NOTE ON KEY-CODE MACROS
+    USBHIDKeyboard.h and BleKeyboard.h both define identically-named macros
+    (KEY_LEFT_GUI, KEY_ESC, KEY_F1, ...). Including both headers in one file
+    causes macro-redefinition errors. We dodge this by capturing each
+    library's constants under our own prefixed names (USBKEY_*, BLEKEY_*)
+    immediately after including each header, then #undef-ing the shared
+    names before the next header is pulled in.
   ============================================================================
 */
 
 #include <M5Cardputer.h>
-#include <USB.h>
-#include <USBHIDKeyboard.h>
 #include <Preferences.h>
 
 #define STAMP_S3_POWER_HOLD_PIN 38
@@ -30,6 +53,141 @@
 #define MAX_SLOTS      13
 #define LABEL_LEN      13
 #define PAYLOAD_LEN    128   // Increased to support long URLs and paths
+
+// ----------------------------------------------------------------------------
+// HID backend #1: USB
+// ----------------------------------------------------------------------------
+#include <USB.h>
+#include <USBHIDKeyboard.h>
+
+#define USBKEY_LEFT_CTRL   KEY_LEFT_CTRL
+#define USBKEY_LEFT_SHIFT  KEY_LEFT_SHIFT
+#define USBKEY_LEFT_ALT    KEY_LEFT_ALT
+#define USBKEY_LEFT_GUI    KEY_LEFT_GUI
+#define USBKEY_RETURN      KEY_RETURN
+#define USBKEY_ESC         KEY_ESC
+#define USBKEY_TAB         KEY_TAB
+#define USBKEY_DELETE      KEY_DELETE
+#define USBKEY_F1          KEY_F1
+
+#undef KEY_LEFT_CTRL
+#undef KEY_LEFT_SHIFT
+#undef KEY_LEFT_ALT
+#undef KEY_LEFT_GUI
+#undef KEY_RETURN
+#undef KEY_ESC
+#undef KEY_TAB
+#undef KEY_DELETE
+#undef KEY_F1
+
+// ----------------------------------------------------------------------------
+// HID backend #2: BLE  (T-vK "ESP32 BLE Keyboard" library)
+// ----------------------------------------------------------------------------
+#include <BleKeyboard.h>
+
+#define BLEKEY_LEFT_CTRL   KEY_LEFT_CTRL
+#define BLEKEY_LEFT_SHIFT  KEY_LEFT_SHIFT
+#define BLEKEY_LEFT_ALT    KEY_LEFT_ALT
+#define BLEKEY_LEFT_GUI    KEY_LEFT_GUI
+#define BLEKEY_RETURN      KEY_RETURN
+#define BLEKEY_ESC         KEY_ESC
+#define BLEKEY_TAB         KEY_TAB
+#define BLEKEY_DELETE      KEY_DELETE
+#define BLEKEY_F1          KEY_F1
+
+#undef KEY_LEFT_CTRL
+#undef KEY_LEFT_SHIFT
+#undef KEY_LEFT_ALT
+#undef KEY_LEFT_GUI
+#undef KEY_RETURN
+#undef KEY_ESC
+#undef KEY_TAB
+#undef KEY_DELETE
+#undef KEY_F1
+
+// ----------------------------------------------------------------------------
+// Connection mode
+// ----------------------------------------------------------------------------
+enum ConnMode : uint8_t { CONN_USB = 0, CONN_BLE = 1 };
+ConnMode connMode = CONN_USB;
+
+USBHIDKeyboard usbKeyboard;
+BleKeyboard    bleKeyboard("Cardputer MacroPad", "DIY", 100);
+
+bool bleWasConnected = false;  // for redraw-on-connect
+
+// ----------------------------------------------------------------------------
+// Named special keys, resolved to the correct backend's code at send time
+// ----------------------------------------------------------------------------
+enum SpecialKey {
+  SK_GUI, SK_CTRL, SK_SHIFT, SK_ALT,
+  SK_ESC, SK_TAB, SK_ENTER, SK_DELETE,
+  SK_F1, SK_F2, SK_F3, SK_F4, SK_F5, SK_F6,
+  SK_F7, SK_F8, SK_F9, SK_F10, SK_F11, SK_F12
+};
+
+uint8_t resolveKey(SpecialKey sk) {
+  if (connMode == CONN_USB) {
+    switch (sk) {
+      case SK_GUI:    return USBKEY_LEFT_GUI;
+      case SK_CTRL:   return USBKEY_LEFT_CTRL;
+      case SK_SHIFT:  return USBKEY_LEFT_SHIFT;
+      case SK_ALT:    return USBKEY_LEFT_ALT;
+      case SK_ESC:    return USBKEY_ESC;
+      case SK_TAB:    return USBKEY_TAB;
+      case SK_ENTER:  return USBKEY_RETURN;
+      case SK_DELETE: return USBKEY_DELETE;
+      default:        return USBKEY_F1 + (sk - SK_F1); // F1..F12 are contiguous
+    }
+  } else {
+    switch (sk) {
+      case SK_GUI:    return BLEKEY_LEFT_GUI;
+      case SK_CTRL:   return BLEKEY_LEFT_CTRL;
+      case SK_SHIFT:  return BLEKEY_LEFT_SHIFT;
+      case SK_ALT:    return BLEKEY_LEFT_ALT;
+      case SK_ESC:    return BLEKEY_ESC;
+      case SK_TAB:    return BLEKEY_TAB;
+      case SK_ENTER:  return BLEKEY_RETURN;
+      case SK_DELETE: return BLEKEY_DELETE;
+      default:        return BLEKEY_F1 + (sk - SK_F1);
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// HID wrapper functions -- everything else in the sketch calls these instead
+// of touching usbKeyboard / bleKeyboard directly
+// ----------------------------------------------------------------------------
+void hidPress(uint8_t code) {
+  if (connMode == CONN_USB) usbKeyboard.press(code);
+  else                      bleKeyboard.press(code);
+}
+
+void hidPressSpecial(SpecialKey sk) {
+  hidPress(resolveKey(sk));
+}
+
+void hidReleaseAll() {
+  if (connMode == CONN_USB) usbKeyboard.releaseAll();
+  else                      bleKeyboard.releaseAll();
+}
+
+void hidPrint(const char *s) {
+  if (connMode == CONN_USB) usbKeyboard.print(s);
+  else                      bleKeyboard.print(s);
+}
+
+void hidWriteEnter() {
+  if (connMode == CONN_USB) usbKeyboard.write(USBKEY_RETURN);
+  else                      bleKeyboard.write(BLEKEY_RETURN);
+}
+
+bool hidReady() {
+  // USB HID has no explicit "connected" concept here (assume ready once begun);
+  // BLE must actually be paired/connected to a host.
+  if (connMode == CONN_USB) return true;
+  return bleKeyboard.isConnected();
+}
 
 enum MacroType : uint8_t {
   TYPE_RAW_TEXT     = 0,  // Types text directly (for usernames/passwords)
@@ -61,15 +219,13 @@ MacroSlot macros[MAX_SLOTS] = {
   { false, 'v', TYPE_WIN_RUN,      "Site B",   "https://google.com" },
 };
 
-USBHIDKeyboard Keyboard;
-Preferences    prefs;
-M5Canvas       canvas(&M5Cardputer.Display);
+Preferences prefs;
+M5Canvas    canvas(&M5Cardputer.Display);
 
 enum AppMode { MODE_ACTIVE, MODE_EDITOR };
 AppMode appMode = MODE_ACTIVE;
 
 enum EditorFocus { FOCUS_LIST, FOCUS_FIELD };
-// Added FIELD_KEY so the trigger key itself can be rebound from the editor.
 enum EditorField  { FIELD_TYPE = 0, FIELD_LABEL = 1, FIELD_PAYLOAD = 2, FIELD_KEY = 3, FIELD_COUNT = 4 };
 
 EditorFocus editorFocus    = FOCUS_LIST;
@@ -84,6 +240,7 @@ void loadMacros();
 void saveSlot(int idx);
 void drawActiveModeUI();
 void drawEditorUI();
+void drawModeSwitchConfirm();
 void handleActiveModeInput(const Keyboard_Class::KeysState &status);
 void handleEditorInput(const Keyboard_Class::KeysState &status);
 void executeMacro(int idx);
@@ -93,7 +250,9 @@ void sendHotkeyCombo(const char *payload);
 void toggleMode();
 bool hidKeyPresent(const Keyboard_Class::KeysState &status, uint8_t code);
 const char *typeName(uint8_t type);
-const char *fieldName(int field);
+void loadConnMode();
+void beginActiveBackend();
+void requestConnModeSwitch();
 
 void setup() {
   pinMode(STAMP_S3_POWER_HOLD_PIN, OUTPUT);
@@ -109,18 +268,47 @@ void setup() {
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
   canvas.setTextSize(1);
 
-  USB.begin();
-  Keyboard.begin();
-
   prefs.begin("macrocfg", false);
+
+  loadConnMode();       // decide USB vs BLE before touching either stack
+  beginActiveBackend(); // initialize ONLY the chosen backend
+
   loadMacros();
 
   appMode = MODE_ACTIVE;
   uiDirty = true;
 }
 
+void loadConnMode() {
+  uint8_t m = prefs.getUChar("connmode", CONN_USB);
+  connMode = (m == CONN_BLE) ? CONN_BLE : CONN_USB;
+}
+
+void beginActiveBackend() {
+  if (connMode == CONN_USB) {
+    USB.begin();
+    usbKeyboard.begin();
+  } else {
+    bleKeyboard.begin();
+  }
+}
+
+void requestConnModeSwitch() {
+  ConnMode newMode = (connMode == CONN_USB) ? CONN_BLE : CONN_USB;
+  prefs.putUChar("connmode", newMode);
+  drawModeSwitchConfirm();   // show "restarting..." before the reboot blip
+  delay(1200);
+  ESP.restart();
+}
+
 void loop() {
   M5Cardputer.update();
+
+  bool nowConnected = hidReady();
+  if (connMode == CONN_BLE && nowConnected != bleWasConnected) {
+    bleWasConnected = nowConnected;
+    uiDirty = true;
+  }
 
   if (M5Cardputer.Keyboard.isChange()) {
     if (M5Cardputer.Keyboard.isPressed()) {
@@ -131,8 +319,7 @@ void loop() {
         if (c == '0') { hitZero = true; break; }
       }
 
-      // Don't let '0' toggle mode while the user is actively typing text into
-      // a field — otherwise they can never type a literal '0' into a payload.
+      // Don't let '0' toggle mode while actively typing into a field.
       if (hitZero && !(appMode == MODE_EDITOR && textEditing)) {
         toggleMode();
       } else if (appMode == MODE_ACTIVE) {
@@ -169,6 +356,7 @@ void toggleMode() {
 }
 
 void handleActiveModeInput(const Keyboard_Class::KeysState &status) {
+  if (!hidReady()) return; // BLE not paired yet -- ignore macro keys
   for (char c : status.word) {
     for (int i = 0; i < MAX_SLOTS; i++) {
       if (macros[i].key == (uint8_t)tolower((unsigned char)c) && macros[i].payload[0] != '\0') {
@@ -190,32 +378,31 @@ void executeMacro(int idx) {
 }
 
 void sendRawText(const char *payload) {
-  Keyboard.print(payload);
+  hidPrint(payload);
 }
 
 void sendWinRun(const char *payload) {
-  Keyboard.press(KEY_LEFT_GUI);
-  Keyboard.press('r');
+  hidPressSpecial(SK_GUI);
+  hidPress((uint8_t)'r');
   delay(40);
-  Keyboard.releaseAll();
+  hidReleaseAll();
   delay(120);
-  Keyboard.print(payload);
+  hidPrint(payload);
   delay(40);
-  Keyboard.write(KEY_RETURN);
+  hidWriteEnter();
 }
 
-// Fixed: now recognizes common named keys (ESC, TAB, ENTER, SPACE, DEL, F1-F12)
-// in addition to single characters, so combos like "CTRL+SHIFT+ESC" actually
-// send the final key instead of silently dropping it.
+// Recognizes modifier names plus ESC/TAB/ENTER/SPACE/DEL/F1-F12 as the final
+// key, so combos like "CTRL+SHIFT+ESC" actually send the final key instead
+// of silently dropping it.
 void sendHotkeyCombo(const char *payload) {
   char buf[PAYLOAD_LEN];
   strncpy(buf, payload, sizeof(buf));
   buf[sizeof(buf) - 1] = '\0';
 
   char *token = strtok(buf, "+");
-  uint8_t finalKey = 0;
-  bool    finalKeyIsChar = false;
-  char    finalChar = 0;
+  bool haveFinal = false;
+  uint8_t finalCode = 0;
 
   while (token != nullptr) {
     while (*token == ' ') token++;
@@ -223,49 +410,42 @@ void sendHotkeyCombo(const char *payload) {
     while (len > 0 && token[len - 1] == ' ') { token[len - 1] = '\0'; len--; }
 
     if (strcasecmp(token, "WIN") == 0 || strcasecmp(token, "GUI") == 0) {
-      Keyboard.press(KEY_LEFT_GUI);
+      hidPressSpecial(SK_GUI);
     } else if (strcasecmp(token, "CTRL") == 0 || strcasecmp(token, "CONTROL") == 0) {
-      Keyboard.press(KEY_LEFT_CTRL);
+      hidPressSpecial(SK_CTRL);
     } else if (strcasecmp(token, "SHIFT") == 0) {
-      Keyboard.press(KEY_LEFT_SHIFT);
+      hidPressSpecial(SK_SHIFT);
     } else if (strcasecmp(token, "ALT") == 0) {
-      Keyboard.press(KEY_LEFT_ALT);
+      hidPressSpecial(SK_ALT);
     } else if (strcasecmp(token, "ESC") == 0 || strcasecmp(token, "ESCAPE") == 0) {
-      finalKey = KEY_ESC;
-      finalKeyIsChar = false;
+      finalCode = resolveKey(SK_ESC);   haveFinal = true;
     } else if (strcasecmp(token, "TAB") == 0) {
-      finalKey = KEY_TAB;
-      finalKeyIsChar = false;
+      finalCode = resolveKey(SK_TAB);   haveFinal = true;
     } else if (strcasecmp(token, "ENTER") == 0 || strcasecmp(token, "RETURN") == 0) {
-      finalKey = KEY_RETURN;
-      finalKeyIsChar = false;
+      finalCode = resolveKey(SK_ENTER); haveFinal = true;
     } else if (strcasecmp(token, "SPACE") == 0) {
-      finalChar = ' ';
-      finalKeyIsChar = true;
+      finalCode = (uint8_t)' ';         haveFinal = true;
     } else if (strcasecmp(token, "DEL") == 0 || strcasecmp(token, "DELETE") == 0) {
-      finalKey = KEY_DELETE;
-      finalKeyIsChar = false;
+      finalCode = resolveKey(SK_DELETE); haveFinal = true;
     } else if ((token[0] == 'F' || token[0] == 'f') && len >= 2 && isdigit((unsigned char)token[1])) {
       int n = atoi(token + 1);
       if (n >= 1 && n <= 12) {
-        finalKey = KEY_F1 + (n - 1);
-        finalKeyIsChar = false;
+        finalCode = resolveKey((SpecialKey)(SK_F1 + (n - 1)));
+        haveFinal = true;
       }
     } else if (len == 1) {
-      finalChar = tolower((unsigned char)token[0]);
-      finalKeyIsChar = true;
+      finalCode = (uint8_t)tolower((unsigned char)token[0]);
+      haveFinal = true;
     }
     token = strtok(nullptr, "+");
   }
 
-  if (finalKeyIsChar && finalChar != 0) {
-    Keyboard.press(finalChar);
-  } else if (finalKey != 0) {
-    Keyboard.press(finalKey);
+  if (haveFinal) {
+    hidPress(finalCode);
   }
 
   delay(50);
-  Keyboard.releaseAll();
+  hidReleaseAll();
 }
 
 void handleEditorInput(const Keyboard_Class::KeysState &status) {
@@ -296,13 +476,11 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
       return;
     }
 
-    // FIELD_KEY only ever holds a single character.
-    size_t destCap = (selectedField == FIELD_KEY)    ? 1
-                    : (selectedField == FIELD_LABEL)  ? (LABEL_LEN - 1)
-                                                       : (PAYLOAD_LEN - 1);
+    size_t destCap = (selectedField == FIELD_KEY)   ? 1
+                    : (selectedField == FIELD_LABEL) ? (LABEL_LEN - 1)
+                                                      : (PAYLOAD_LEN - 1);
     for (char c : status.word) {
       if (selectedField == FIELD_KEY) {
-        // Always overwrite, never accumulate, for a single-char field.
         editBuffer[0] = c;
         editBuffer[1] = '\0';
         editBufferLen = 1;
@@ -317,6 +495,14 @@ void handleEditorInput(const Keyboard_Class::KeysState &status) {
   }
 
   if (editorFocus == FOCUS_LIST) {
+    // 'M' toggles the connection mode (USB<->BLE) and reboots -- only here,
+    // not while a field is open, so it doesn't collide with typed text.
+    for (char c : status.word) {
+      if (tolower((unsigned char)c) == 'm') {
+        requestConnModeSwitch();
+        return;
+      }
+    }
     if (hidKeyPresent(status, HID_KEY_UP)) {
       selectedSlot = (selectedSlot - 1 + MAX_SLOTS) % MAX_SLOTS;
       uiDirty = true;
@@ -416,23 +602,17 @@ const char *typeName(uint8_t type) {
   }
 }
 
-const char *fieldName(int field) {
-  switch (field) {
-    case FIELD_TYPE:    return "Type";
-    case FIELD_LABEL:   return "Lbl";
-    case FIELD_PAYLOAD: return "Pay";
-    case FIELD_KEY:     return "Key";
-    default:             return "?";
-  }
-}
-
 void drawActiveModeUI() {
   canvas.fillSprite(BLACK);
 
   canvas.fillRect(0, 0, 240, 14, NAVY);
   canvas.setTextColor(WHITE, NAVY);
   canvas.setCursor(4, 3);
-  canvas.print("MACRO [ACTIVE]  0=Edit");
+  if (connMode == CONN_USB) {
+    canvas.print("MACRO [ACTIVE] USB  0=Edit");
+  } else {
+    canvas.printf("MACRO [ACTIVE] BLE:%s 0=Edit", hidReady() ? "OK" : "...");
+  }
 
   canvas.setTextColor(GREENYELLOW, BLACK);
   int y = 18;
@@ -450,6 +630,12 @@ void drawActiveModeUI() {
     col++;
     if (col == 2) { col = 0; y += 11; }
   }
+
+  if (connMode == CONN_BLE && !hidReady()) {
+    canvas.setTextColor(ORANGE, BLACK);
+    canvas.setCursor(4, 122);
+    canvas.print("Waiting for BLE pairing...");
+  }
 }
 
 void drawEditorUI() {
@@ -458,7 +644,7 @@ void drawEditorUI() {
   canvas.fillRect(0, 0, 240, 14, MAROON);
   canvas.setTextColor(WHITE, MAROON);
   canvas.setCursor(4, 3);
-  canvas.print("EDITOR [Arrows/Enter] 0=Exit");
+  canvas.print("EDITOR 0=Exit  M=USB/BLE");
 
   int y = 18;
   for (int i = 0; i < MAX_SLOTS; i++) {
@@ -481,7 +667,6 @@ void drawEditorUI() {
     canvas.drawRect(120, 16, 118, 118, DARKGREY);
     int fy = 20;
 
-    // Key field
     canvas.setTextColor(selectedField == FIELD_KEY ? BLACK : WHITE,
                        selectedField == FIELD_KEY ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
@@ -492,14 +677,12 @@ void drawEditorUI() {
     }
     fy += 14;
 
-    // Type field
     canvas.setTextColor(selectedField == FIELD_TYPE ? BLACK : WHITE,
                        selectedField == FIELD_TYPE ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
     canvas.printf("Type:%s", typeName(macros[selectedSlot].type));
     fy += 14;
 
-    // Label field
     canvas.setTextColor(selectedField == FIELD_LABEL ? BLACK : WHITE,
                        selectedField == FIELD_LABEL ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
@@ -510,7 +693,6 @@ void drawEditorUI() {
     }
     fy += 14;
 
-    // Payload field
     canvas.setTextColor(selectedField == FIELD_PAYLOAD ? BLACK : WHITE,
                        selectedField == FIELD_PAYLOAD ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
@@ -536,5 +718,23 @@ void drawEditorUI() {
     canvas.print("Up/Dn: select");
     canvas.setCursor(124, 32);
     canvas.print("Right/Enter: open");
+    canvas.setCursor(124, 48);
+    canvas.printf("Mode: %s", connMode == CONN_USB ? "USB" : "BLE");
   }
+}
+
+void drawModeSwitchConfirm() {
+  canvas.fillSprite(BLACK);
+  canvas.fillRect(0, 0, 240, 14, MAROON);
+  canvas.setTextColor(WHITE, MAROON);
+  canvas.setCursor(4, 3);
+  canvas.print("SWITCHING MODE");
+
+  ConnMode newMode = (connMode == CONN_USB) ? CONN_BLE : CONN_USB;
+  canvas.setTextColor(WHITE, BLACK);
+  canvas.setCursor(10, 40);
+  canvas.printf("Switching to: %s", newMode == CONN_USB ? "USB" : "BLE");
+  canvas.setCursor(10, 56);
+  canvas.print("Restarting...");
+  canvas.pushSprite(0, 0);
 }
