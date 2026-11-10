@@ -20,15 +20,17 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
           arduino-cli lib install M5Cardputer
+          arduino-cli lib install "ESP32 BLE Keyboard"
+          arduino-cli lib install "NimBLE-Arduino"
 
       - name: Prepare Sketch Structure and Compile
         run: |
           # Create a proper Arduino sketch folder and move the .ino file into it
           mkdir -p cardputer-macropad
           mv cardputer-macropad.ino cardputer-macropad/
-          
+
           # Compile the properly structured sketch folder
-          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=default,USBMode=default --export-binaries cardputer-macropad
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=default --export-binaries cardputer-macropad
 
       - name: Upload Compiled Binary Artifacts
         uses: actions/upload-artifact@v4
