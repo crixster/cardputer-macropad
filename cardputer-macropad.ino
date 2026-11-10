@@ -1,162 +1,64 @@
 /*
   ============================================================================
-  CardputerMacroPad.ino
+  cardputer-macropad.ino
   ============================================================================
   M5Stack Cardputer (v1.1) -> USB or BLE HID Macro Keyboard & Command Launcher
   Target host: Windows 11
-  MCU: ESP32-S3 (Stamp-S3), 240x135 TFT, 56-key matrix keyboard
 
-  ----------------------------------------------------------------------------
-  WHAT THIS IS
-  ----------------------------------------------------------------------------
-  Turns the Cardputer into a 13-slot macro keyboard. Each slot is bound to a
-  physical key on the Cardputer's keyboard (default: 1-9, z, x, c, v) and,
-  when pressed, sends one of three kinds of action to whatever PC it's
-  connected to:
-    - type out a fixed piece of text (e.g. a saved username/password)
-    - open Windows Run (Win+R), type a command/path/URL, hit Enter
-    - fire a hotkey combination (e.g. WIN+L to lock the PC)
-  All 13 slots are fully editable on-device: which key triggers a slot, what
-  type of action it performs, its display label, and its payload (the
-  text/command/combo it sends) -- no reflashing needed for day-to-day macro
-  changes. Edits are saved to flash (Preferences / NVS) and survive power
-  cycles and reflashes.
+  FILES (all must sit in the same sketch folder):
+    cardputer-macropad.ino   this file (UI, macros, storage)
+    hid_backend.h            neutral HID interface + MP_KEY_* constants
+    hid_usb.cpp              USB backend (USBHIDKeyboard)
+    hid_ble.cpp              BLE backend (ESP32 BLE Keyboard by T-vK)
 
-  ----------------------------------------------------------------------------
-  USB vs BLE: WHY THIS IS TWO SEPARATE FIRMWARE BUILDS, NOT ONE
-  ----------------------------------------------------------------------------
-  This sketch supports BOTH a wired USB-HID keyboard mode and a wireless
-  BLE-HID keyboard mode, but NOT as a single binary you switch at runtime.
-  Here's why: the USB backend (USBHIDKeyboard.h, part of the ESP32 Arduino
-  core) and the BLE backend (BleKeyboard.h, "ESP32 BLE Keyboard" by T-vK)
-  each declare their OWN "KeyReport" struct with the same name but different
-  internal layouts. That's a genuine C++ type conflict, not a macro naming
-  clash -- there is no #define/#undef trick that fixes two incompatible
-  struct definitions sharing one name in the same compiled file. So the two
-  backends can never both be included in one compile.
+  WHY THE HID CODE IS IN SEPARATE FILES
+  M5Cardputer.h defines KEY_LEFT_CTRL, KEY_TAB, etc. as macros. BleKeyboard.h
+  declares the same names as real constants, and the USB and BLE libraries
+  also both define a "KeyReport" struct. Each .cpp file is its own
+  compilation unit, so isolating each HID library in its own file (which
+  never includes M5Cardputer.h) makes these conflicts impossible.
+  This file therefore never uses library KEY_* names; it uses MP_KEY_*.
 
-  Instead, which backend gets compiled in is controlled by a single
-  preprocessor flag, BUILD_BLE:
-    - Flag NOT defined (default)  -> compiles the USB-HID backend.
-    - Flag defined (-DBUILD_BLE)  -> compiles the BLE-HID backend.
-  The accompanying GitHub Actions workflow compiles this sketch TWICE, once
-  each way, producing two separate .bin files:
-    - a USB-mode firmware
-    - a BLE-mode firmware
-  To "choose" USB or BLE, you flash the matching .bin. To switch later, you
-  flash the other one -- that's it, no code edits required for normal use.
-  If you're building locally in the Arduino IDE instead of via the Actions
-  workflow, add -DBUILD_BLE yourself for a BLE build via
-  Sketch -> "Export compiled Binary" won't let you pass defines directly;
-  easiest local option is Tools -> ... there isn't a GUI field for this in
-  the IDE, so for local BLE builds either (a) use arduino-cli with
-  --build-property "build.extra_flags=-DBUILD_BLE" like the CI workflow
-  does, or (b) temporarily uncomment the line below marked
-  "UNCOMMENT FOR LOCAL BLE BUILD IN THE IDE".
-  */
-  // #define BUILD_BLE   // <-- UNCOMMENT FOR LOCAL BLE BUILD IN THE IDE
-/*
-  ----------------------------------------------------------------------------
-  HOW TO USE IT ON THE DEVICE
-  ----------------------------------------------------------------------------
-  There are two screens (modes), and you switch between them with the '0' key:
+  USB vs BLE
+  One backend per firmware build, chosen by the BUILD_BLE flag:
+    not defined -> USB firmware
+    -DBUILD_BLE -> BLE firmware
+  The GitHub Actions workflow builds both. Flash the .bin you want.
 
-  ** ACTIVE MODE (default on boot) **
-    This is the "working" screen. The top bar shows which firmware build
-    you're running (USB or BLE) and, in a BLE build, whether a host is
-    currently paired and connected.
-    - Press any key that's bound to a slot (shown as "[X] Label" on screen)
-      and that macro fires immediately -- text gets typed / Run dialog opens
-      / hotkey gets sent to whatever device you're connected to.
-    - Slots with no payload set show as "--empty--" and do nothing if pressed.
-    - In a BLE build, macro keys are ignored (silently) until a host is
-      actually connected -- you'll see "Waiting for BLE pairing..." on
-      screen until then.
-    - Press '0' to enter EDITOR MODE.
+  USAGE
+  ACTIVE MODE (default): press a bound key to fire its macro. '0' = editor.
+  EDITOR MODE:
+    Slot list: Up/Down move, Right/Enter open slot, '0' exit editor.
+    Fields:    Up/Down move (Key, Type, Label, Payload), Left = back,
+               Enter on Type cycles RAW_TEXT -> WIN_RUN -> HOTKEY,
+               Enter on Key/Label/Payload edits text (Enter saves,
+               Del removes a char). '0' can be typed while text-editing.
 
-  ** EDITOR MODE **
-    This is where you customize slots. The left column is the slot list;
-    the right panel shows the fields of whichever slot is open.
-      Slot list (left column has focus):
-        Up / Down       -> move the highlighted slot
-        Right or Enter  -> open the highlighted slot's fields (focus moves
-                           to the right-hand field panel)
-        '0'             -> exit editor, return to Active Mode
-      Field panel (right column has focus, slot is "open"):
-        Up / Down  -> move between the 4 fields: Key, Type, Label, Payload
-        Left       -> go back to the slot list (closes this slot)
-        Enter on "Type"    -> cycles RAW_TEXT -> WIN_RUN -> HOTKEY -> ...
-        Enter on "Key/Label/Payload" -> starts text-editing that field:
-            - type on the Cardputer keyboard to enter text
-            - Backspace/Del removes the last character
-            - Enter saves the field and exits text-editing
-          (the "Key" field only ever keeps 1 character -- whatever you type
-          last replaces it, since a trigger key is always a single key)
-        '0' is NOT available as "exit" while text-editing, so you can safely
-          type a literal 0 into a payload (e.g. part of a password or URL).
+  BLE pairing: Windows 11 -> Settings -> Bluetooth & devices -> Add device
+  -> Bluetooth -> "Cardputer MacroPad". If stuck "not connecting", remove
+  the device in Windows and pair again.
 
-  ** PAIRING OVER BLUETOOTH (BLE-build firmware only) **
-    Once booted, the device advertises itself as a Bluetooth LE keyboard
-    named "Cardputer MacroPad".
-    On the Windows 11 PC: Settings -> Bluetooth & devices -> Add device ->
-    Bluetooth -> select "Cardputer MacroPad" -> it pairs like any BT
-    keyboard, no PIN needed. The Cardputer's top status bar shows "BLE:..."
-    while waiting and "BLE:OK" once a host is actually connected.
-    If Windows ever shows it as paired but stuck "not connecting": remove
-    the device from Windows Bluetooth settings and re-pair. That's a known
-    quirk of BLE HID devices in general, not specific to this code.
+  MACRO TYPES
+    RAW_TEXT      types the payload literally.
+    WIN_RUN       Win+R, types the payload, presses Enter.
+    HOTKEY_COMBO  '+'-separated, e.g. "CTRL+SHIFT+ESC", "WIN+L".
+                  Modifiers: WIN/GUI, CTRL/CONTROL, SHIFT, ALT.
+                  Final key: single char, ESC, TAB, ENTER, SPACE, DEL, F1-F12.
 
-  ** USING OVER USB (USB-build firmware only) **
-    Just plug the Cardputer into the PC with a USB-C data cable. No pairing,
-    no drivers -- Windows sees a standard USB HID keyboard immediately.
+  LIBRARIES
+    Always: M5Cardputer
+    BLE build: "ESP32 BLE Keyboard" by T-vK (git install) and optionally
+               NimBLE-Arduino (only used if USE_NIMBLE is defined).
 
-  ----------------------------------------------------------------------------
-  MACRO TYPES EXPLAINED (what each Type does with its Payload)
-  ----------------------------------------------------------------------------
-    RAW_TEXT      Payload is typed out literally, character by character.
-                  Good for usernames, passwords, snippets.
-    WIN_RUN       Sends Win+R (opens the Windows Run dialog), waits briefly
-                  for it to open, types the Payload, then presses Enter.
-                  Good for launching apps ("notepad", "calc") or opening a
-                  URL/file path directly.
-    HOTKEY_COMBO  Payload is parsed as '+'-separated tokens, e.g.
-                  "CTRL+SHIFT+ESC" or "WIN+L". Recognized modifier tokens:
-                  WIN/GUI, CTRL/CONTROL, SHIFT, ALT. Recognized final-key
-                  tokens: any single character (a-z, 0-9, etc.), ESC/ESCAPE,
-                  TAB, ENTER/RETURN, SPACE, DEL/DELETE, F1 through F12.
-                  All modifiers are held down, then the final key is
-                  pressed, then everything is released.
-
-  ----------------------------------------------------------------------------
-  REQUIRED LIBRARIES
-  ----------------------------------------------------------------------------
-    Always:
-      - M5Cardputer (pulls in M5Unified, M5GFX)
-    USB build only:
-      - USB / USBHIDKeyboard (bundled with the ESP32 Arduino core -- no
-        separate install needed)
-    BLE build only:
-      - "ESP32 BLE Keyboard" by T-vK (BleKeyboard.h) -- NOT in the official
-        Arduino Library Manager index; install via Library Manager's
-        "Add .ZIP Library" from a downloaded release, or in CI via
-        arduino-cli's --git-url install (requires
-        `arduino-cli config set library.enable_unsafe_install true` first).
-      - "NimBLE-Arduino" by h2zero -- IS in the Library Manager index,
-        install normally. BleKeyboard.h uses this automatically once it's
-        present alongside it.
-
-  ----------------------------------------------------------------------------
-  BOARD SETTINGS (Arduino IDE, Tools menu) -- needed for BOTH build variants
-  ----------------------------------------------------------------------------
-    USB Mode:        "USB-OTG (TinyUSB)"
-    USB CDC On Boot: "Enabled"
-  Required for USBHIDKeyboard to resolve/compile on ESP32-S3 targets at all,
-  even in a BLE build (the USB core library is still part of the platform).
+  BOARD SETTINGS: USB Mode "USB-OTG (TinyUSB)", USB CDC On Boot "Enabled".
+  For a local BLE build in the Arduino IDE, add -DBUILD_BLE via arduino-cli:
+    --build-property "compiler.cpp.extra_flags=-DBUILD_BLE"
   ============================================================================
 */
 
 #include <M5Cardputer.h>
 #include <Preferences.h>
+#include "hid_backend.h"
 
 #define STAMP_S3_POWER_HOLD_PIN 38
 
@@ -168,81 +70,14 @@
 
 #define MAX_SLOTS      13
 #define LABEL_LEN      13
-#define PAYLOAD_LEN    128   // Increased to support long URLs and paths
+#define PAYLOAD_LEN    128   // Long enough for URLs and paths
 
-// ----------------------------------------------------------------------------
-// HID backend selection (compile-time only -- see big comment block above)
-// ----------------------------------------------------------------------------
-#if defined(BUILD_BLE)
-  #define HID_BACKEND_BLE
-  #include <BleKeyboard.h>
-  BleKeyboard bleKeyboard("Cardputer MacroPad", "DIY", 100);
-  bool bleWasConnected = false;  // for redraw-on-connect
-#else
-  #define HID_BACKEND_USB
-  #include <USB.h>
-  #include <USBHIDKeyboard.h>
-  USBHIDKeyboard usbKeyboard;
+#ifdef HID_BACKEND_BLE
+bool bleWasConnected = false;  // for redraw-on-connect
 #endif
-
-// ----------------------------------------------------------------------------
-// HID wrapper functions -- everything else in the sketch calls these instead
-// of touching usbKeyboard / bleKeyboard directly, so the rest of the code
-// doesn't need to care which backend is active.
-// ----------------------------------------------------------------------------
-void hidBegin() {
-#ifdef HID_BACKEND_USB
-  USB.begin();
-  usbKeyboard.begin();
-#else
-  bleKeyboard.begin();
-#endif
-}
-
-void hidPress(uint8_t code) {
-#ifdef HID_BACKEND_USB
-  usbKeyboard.press(code);
-#else
-  bleKeyboard.press(code);
-#endif
-}
-
-void hidReleaseAll() {
-#ifdef HID_BACKEND_USB
-  usbKeyboard.releaseAll();
-#else
-  bleKeyboard.releaseAll();
-#endif
-}
-
-void hidPrint(const char *s) {
-#ifdef HID_BACKEND_USB
-  usbKeyboard.print(s);
-#else
-  bleKeyboard.print(s);
-#endif
-}
-
-void hidWriteEnter() {
-#ifdef HID_BACKEND_USB
-  usbKeyboard.write(KEY_RETURN);
-#else
-  bleKeyboard.write(KEY_RETURN);
-#endif
-}
-
-bool hidReady() {
-  // USB HID has no explicit "connected" concept here (assume ready once
-  // begun); BLE must actually be paired/connected to a host.
-#ifdef HID_BACKEND_USB
-  return true;
-#else
-  return bleKeyboard.isConnected();
-#endif
-}
 
 enum MacroType : uint8_t {
-  TYPE_RAW_TEXT     = 0,  // Types text directly (for usernames/passwords)
+  TYPE_RAW_TEXT     = 0,  // Types text directly (usernames/passwords)
   TYPE_WIN_RUN      = 1,  // Opens Win+R, types command/path, hits Enter
   TYPE_HOTKEY_COMBO = 2   // Executes hotkey combination (e.g., WIN+L)
 };
@@ -278,7 +113,7 @@ enum AppMode { MODE_ACTIVE, MODE_EDITOR };
 AppMode appMode = MODE_ACTIVE;
 
 enum EditorFocus { FOCUS_LIST, FOCUS_FIELD };
-enum EditorField  { FIELD_TYPE = 0, FIELD_LABEL = 1, FIELD_PAYLOAD = 2, FIELD_KEY = 3, FIELD_COUNT = 4 };
+enum EditorField { FIELD_TYPE = 0, FIELD_LABEL = 1, FIELD_PAYLOAD = 2, FIELD_KEY = 3, FIELD_COUNT = 4 };
 
 EditorFocus editorFocus    = FOCUS_LIST;
 int         selectedSlot   = 0;
@@ -408,7 +243,7 @@ void sendRawText(const char *payload) {
 }
 
 void sendWinRun(const char *payload) {
-  hidPress(KEY_LEFT_GUI);
+  hidPress(MP_KEY_LEFT_GUI);
   hidPress((uint8_t)'r');
   delay(40);
   hidReleaseAll();
@@ -418,9 +253,8 @@ void sendWinRun(const char *payload) {
   hidWriteEnter();
 }
 
-// Recognizes modifier names plus ESC/TAB/ENTER/SPACE/DEL/F1-F12 as the final
-// key, so combos like "CTRL+SHIFT+ESC" actually send the final key instead
-// of silently dropping it.
+// Modifiers plus ESC/TAB/ENTER/SPACE/DEL/F1-F12 are recognised as the final
+// key, so combos like "CTRL+SHIFT+ESC" send the final key correctly.
 void sendHotkeyCombo(const char *payload) {
   char buf[PAYLOAD_LEN];
   strncpy(buf, payload, sizeof(buf));
@@ -436,27 +270,27 @@ void sendHotkeyCombo(const char *payload) {
     while (len > 0 && token[len - 1] == ' ') { token[len - 1] = '\0'; len--; }
 
     if (strcasecmp(token, "WIN") == 0 || strcasecmp(token, "GUI") == 0) {
-      hidPress(KEY_LEFT_GUI);
+      hidPress(MP_KEY_LEFT_GUI);
     } else if (strcasecmp(token, "CTRL") == 0 || strcasecmp(token, "CONTROL") == 0) {
-      hidPress(KEY_LEFT_CTRL);
+      hidPress(MP_KEY_LEFT_CTRL);
     } else if (strcasecmp(token, "SHIFT") == 0) {
-      hidPress(KEY_LEFT_SHIFT);
+      hidPress(MP_KEY_LEFT_SHIFT);
     } else if (strcasecmp(token, "ALT") == 0) {
-      hidPress(KEY_LEFT_ALT);
+      hidPress(MP_KEY_LEFT_ALT);
     } else if (strcasecmp(token, "ESC") == 0 || strcasecmp(token, "ESCAPE") == 0) {
-      finalCode = KEY_ESC;      haveFinal = true;
+      finalCode = MP_KEY_ESC;      haveFinal = true;
     } else if (strcasecmp(token, "TAB") == 0) {
-      finalCode = KEY_TAB;      haveFinal = true;
+      finalCode = MP_KEY_TAB;      haveFinal = true;
     } else if (strcasecmp(token, "ENTER") == 0 || strcasecmp(token, "RETURN") == 0) {
-      finalCode = KEY_RETURN;   haveFinal = true;
+      finalCode = MP_KEY_RETURN;   haveFinal = true;
     } else if (strcasecmp(token, "SPACE") == 0) {
-      finalCode = (uint8_t)' '; haveFinal = true;
+      finalCode = (uint8_t)' ';    haveFinal = true;
     } else if (strcasecmp(token, "DEL") == 0 || strcasecmp(token, "DELETE") == 0) {
-      finalCode = KEY_DELETE;   haveFinal = true;
+      finalCode = MP_KEY_DELETE;   haveFinal = true;
     } else if ((token[0] == 'F' || token[0] == 'f') && len >= 2 && isdigit((unsigned char)token[1])) {
       int n = atoi(token + 1);
       if (n >= 1 && n <= 12) {
-        finalCode = KEY_F1 + (n - 1);
+        finalCode = (uint8_t)(MP_KEY_F1 + (n - 1));
         haveFinal = true;
       }
     } else if (len == 1) {
@@ -688,7 +522,7 @@ void drawEditorUI() {
     int fy = 20;
 
     canvas.setTextColor(selectedField == FIELD_KEY ? BLACK : WHITE,
-                       selectedField == FIELD_KEY ? ORANGE : BLACK);
+                        selectedField == FIELD_KEY ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
     if (textEditing && selectedField == FIELD_KEY) {
       canvas.printf("Key:%c_", editBuffer[0] ? toupper(editBuffer[0]) : ' ');
@@ -698,13 +532,13 @@ void drawEditorUI() {
     fy += 14;
 
     canvas.setTextColor(selectedField == FIELD_TYPE ? BLACK : WHITE,
-                       selectedField == FIELD_TYPE ? ORANGE : BLACK);
+                        selectedField == FIELD_TYPE ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
     canvas.printf("Type:%s", typeName(macros[selectedSlot].type));
     fy += 14;
 
     canvas.setTextColor(selectedField == FIELD_LABEL ? BLACK : WHITE,
-                       selectedField == FIELD_LABEL ? ORANGE : BLACK);
+                        selectedField == FIELD_LABEL ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
     if (textEditing && selectedField == FIELD_LABEL) {
       canvas.printf("Lbl:%.12s_", editBuffer);
@@ -714,7 +548,7 @@ void drawEditorUI() {
     fy += 14;
 
     canvas.setTextColor(selectedField == FIELD_PAYLOAD ? BLACK : WHITE,
-                       selectedField == FIELD_PAYLOAD ? ORANGE : BLACK);
+                        selectedField == FIELD_PAYLOAD ? ORANGE : BLACK);
     canvas.setCursor(124, fy);
     if (textEditing && selectedField == FIELD_PAYLOAD) {
       canvas.printf("Pay:%.16s_", editBuffer);
