@@ -1,4 +1,4 @@
-name: Build Cardputer MacroPad Firmware
+name: Build MacroPad Firmware (Cardputer + StickS3 remote)
 
 on:
   workflow_dispatch:
@@ -17,23 +17,40 @@ jobs:
         run: |
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli config set library.enable_unsafe_install true
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
           arduino-cli lib install M5Cardputer
+          arduino-cli lib install M5Unified
+          arduino-cli lib install M5GFX
+          arduino-cli lib install --git-url https://github.com/m5stack/M5PM1.git
 
-      - name: Prepare Sketch Structure
+      - name: Prepare Sketch Folders
         run: |
-          mkdir -p cardputer-macropad
+          mkdir -p cardputer-macropad stick-remote
           mv cardputer-macropad.ino cardputer-macropad/
+          mv stick-remote.ino stick-remote/
 
-      - name: Compile USB Firmware
+      - name: Compile Cardputer Firmware (USB HID + remote receiver)
         run: |
           arduino-cli compile \
             --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=default \
-            --output-dir build-usb cardputer-macropad
+            --output-dir build-cardputer cardputer-macropad
 
-      - name: Upload USB Firmware
+      - name: Compile StickS3 Remote Firmware
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PartitionScheme=default_8MB \
+            --output-dir build-stick stick-remote
+
+      - name: Upload Cardputer Firmware
         uses: actions/upload-artifact@v4
         with:
-          name: cardputer-macropad-usb-firmware
-          path: 'build-usb/**/*.bin'
+          name: cardputer-macropad-firmware
+          path: 'build-cardputer/**/*.bin'
+
+      - name: Upload StickS3 Firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: sticks3-remote-firmware
+          path: 'build-stick/**/*.bin'
