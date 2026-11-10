@@ -126,7 +126,7 @@ const char *typeName(uint8_t type);
 // Frames are encrypted and filtered by sender MAC.
 // ============================================================================
 // >>> Put the M5StickS3's MAC address here (shown on the stick's screen). <<<
-static const uint8_t PEER_MAC[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+static const uint8_t PEER_MAC[6] = { 0x7C, 0xE8, 0xB1, 0xE4, 0xC5, 0xF4 };
 
 // Shared keys -- MUST be identical on the stick. Exactly 16 characters each.
 static const char LINK_PMK[17] = "MacroPadPMK_2026";
