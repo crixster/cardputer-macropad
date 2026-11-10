@@ -77,19 +77,23 @@ struct MacroSlot {
 };
 
 MacroSlot macros[MAX_SLOTS] = {
-  { false, '1', TYPE_RAW_TEXT,     "User1",    "user1" },
-  { false, '2', TYPE_RAW_TEXT,     "Pass1",    "pass1" },
-  { false, '3', TYPE_RAW_TEXT,     "User2",    "user2" },
-  { false, '4', TYPE_RAW_TEXT,     "Pass2",    "pass2" },
-  { false, '5', TYPE_HOTKEY_COMBO, "Lock PC",  "WIN+L" },
-  { false, '6', TYPE_HOTKEY_COMBO, "TaskMgr",  "CTRL+SHIFT+ESC" },
-  { false, '7', TYPE_WIN_RUN,      "Notepad",  "notepad" },
-  { false, '8', TYPE_WIN_RUN,      "Edge",     "msedge" },
-  { false, '9', TYPE_WIN_RUN,      "chrome",     "chrome" },
-  { false, 'z', TYPE_WIN_RUN,      "BMC",      "https://continentalit-smartit.onbmc.com/smartit/app/#/ticket-console" },
-  { false, 'x', TYPE_WIN_RUN,      "Adam",   "D:\ADAM\ADAM.bat" },
-  { false, 'c', TYPE_HOTKEY_COMBO, "Lock PC",  "WIN+L" },
-  { false, 'v', TYPE_WIN_RUN,      "Shutdown",   "D:\ForcedShutdown.bat" },
+  { false, '1', TYPE_RAW_TEXT,     "User ID",    "" },
+  { false, '2', TYPE_RAW_TEXT,     "User Pass",    "" },
+  { false, '3', TYPE_RAW_TEXT,     "Admin ID",    "ui" },
+  { false, '4', TYPE_RAW_TEXT,     "Admin Pass",    "" },
+  { false, '5', TYPE_RAW_TEXT,     "email",  "" },
+  { false, '6', TYPE_RAW_TEXT,     "wanID",  "ui@" },
+  { false, '8', TYPE_WIN_RUN,      "Shutdown",   "D:\ForcedShutdown.bat" },
+  { false, 'w', TYPE_RAW_TEXT, "Spare",  "" },
+  { false, 'q', TYPE_RAW_TEXT, "Spare",  "" },
+  { false, 'e', TYPE_WIN_RUN,      "Edge",     "msedge" },
+  { false, 'r', TYPE_RAW_TEXT, "Spare",  "" },
+  { false, 't', TYPE_HOTKEY_COMBO, "TaskMgr",  "CTRL+SHIFT+ESC" },
+  { false, 'c', TYPE_WIN_RUN,      "chrome",     "chrome" },
+  { false, 'b', TYPE_WIN_RUN,      "BMC",      "https://continentalit-smartit.onbmc.com/smartit/app/#/ticket-console" },
+  { false, 'a', TYPE_WIN_RUN,      "Adam",   "D:\ADAM.bat" },
+  { false, 'l', TYPE_HOTKEY_COMBO, "Lock PC",  "WIN+L" },
+  
 };
 
 Preferences prefs;
