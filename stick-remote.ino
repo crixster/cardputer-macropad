@@ -5,21 +5,25 @@
   The stick is NOT a keyboard. It sends a slot number to the Cardputer over
   ESP-NOW, and the Cardputer (plugged into the PC via USB) types the macro.
 
-  LOCKED TO ONE PEER: frames are accepted only from PEER_MAC (the Cardputer)
-  and are encrypted with a shared key. Set PEER_MAC below.
+  LOCKED TO ONE PEER: frames are accepted only from the paired Cardputer's
+  MAC and are encrypted with a shared key.
 
-  FIRST-TIME SETUP (MAC addresses)
-    1. Flash both devices once with the all-zero PEER_MAC placeholders.
-    2. Read each device's MAC:  stick = main screen,
-       Cardputer = Editor mode (press 0) -> right panel.
-    3. Put the Cardputer's MAC in PEER_MAC here, and the stick's MAC in
-       PEER_MAC in the Cardputer sketch. Rebuild and reflash both.
+  PAIRING (no typing required -- the stick only has 2 buttons)
+    Hold BOTH Button A and Button B together for about 1.2s to enter
+    "Pairing: listening..." mode. The Cardputer broadcasts its own MAC
+    every few seconds; the stick grabs the first one it hears, saves it,
+    and re-pairs automatically. On the Cardputer side, make sure this
+    stick's MAC is added as one of its (up to 4) paired devices from its
+    own Pairing screen -- press 'P' from its editor, open a slot, and type
+    this stick's MAC (shown on this screen) in as 12 hex characters.
 
   CONTROLS
     Button A (front)  click  -> send the highlighted macro
     Button A          hold   -> make / un-make the highlighted macro a DEFAULT
     Button B (side)   click  -> next macro
     Button B          hold   -> re-sync the macro list from the Cardputer
+    Button A + B      hold together (~1.2s) -> auto-pair: listen for the
+                                                 Cardputer's MAC and save it
 
   LIST ORDER
     Defaults (marked *) are always at the top, in slot order, followed by all
@@ -40,15 +44,24 @@
 #define LABEL_LEN    13
 #define VISIBLE_ROWS 5
 
-// >>> Put the CARDPUTER's MAC address here (shown on the Cardputer screen). <<<
-static const uint8_t PEER_MAC[6] = { 0xB0, 0x81, 0x84, 0x96, 0xA7, 0x0C };
+// Fallback used only on first boot, before any pairing has happened. After
+// that, the stored (possibly auto-paired) MAC in NVS always wins. You no
+// longer need to recompile to re-pair -- hold A+B to auto-pair instead.
+static const uint8_t DEFAULT_PEER_MAC[6] = { 0xB0, 0x81, 0x84, 0x96, 0xA7, 0x0C };
+uint8_t peerMac[6];
 
 // Shared keys -- MUST be identical on the Cardputer. Exactly 16 characters.
 static const char LINK_PMK[17] = "MacroPadPMK_2026";
 static const char LINK_LMK[17] = "MacroPadLMK_2026";
 
 #define LINK_MAGIC 0x4D50524DUL
-enum LinkType : uint8_t { MSG_TRIGGER = 1, MSG_SYNC_REQ = 2, MSG_SLOT_INFO = 3, MSG_ACK = 4 };
+enum LinkType : uint8_t {
+  MSG_TRIGGER   = 1,
+  MSG_SYNC_REQ  = 2,
+  MSG_SLOT_INFO = 3,
+  MSG_ACK       = 4,
+  MSG_ANNOUNCE  = 5   // unencrypted broadcast from the Cardputer: "here is my MAC"
+};
 
 // Keep this struct IDENTICAL in the Cardputer sketch.
 struct __attribute__((packed)) LinkMsg {
@@ -78,6 +91,13 @@ volatile bool    ackGot = false;
 volatile uint8_t ackSeq = 0;
 volatile bool    ackOk  = false;
 
+// Auto-pair capture
+volatile bool    pairCaptured = false;
+volatile uint8_t pendingPairMac[6];
+bool     pairScanning = false;
+uint32_t pairScanUntil = 0;
+uint32_t comboPressStart = 0;
+
 Preferences prefs;
 M5Canvas    canvas(&M5.Display);
 
@@ -97,38 +117,55 @@ uint32_t lastSyncReq = 0;
 bool     needSave = false;
 bool     dirty = true;
 
+// Battery
+int      batteryPct   = -1;
+uint32_t lastBattPoll = 0;
+
 char     toastText[40] = "";
 uint16_t toastColor = WHITE;
 uint32_t toastUntil = 0;
 
 void macToStr(const uint8_t *m, char *out);
-bool linkPeerConfigured();
+bool peerMacConfigured();
 void linkHandle(const uint8_t *mac, const uint8_t *data, int len);
 void linkBegin();
+void registerPeer();
 void sendMsg(uint8_t type, uint8_t slot, uint8_t seq);
 void requestSync();
 void rebuildOrder(int keepSlot);
 void setToast(const char *msg, uint16_t color);
 void toggleDefault();
 void sendSelected();
+void startPairScan();
 void draw();
 
 void macToStr(const uint8_t *m, char *out) {
   snprintf(out, 20, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
 }
 
-bool linkPeerConfigured() {
-  for (int i = 0; i < 6; i++) if (PEER_MAC[i] != 0) return true;
+bool peerMacConfigured() {
+  for (int i = 0; i < 6; i++) if (peerMac[i] != 0) return true;
   return false;
 }
 
 // Runs in the WiFi task: only copy data, no drawing / flash access.
 void linkHandle(const uint8_t *mac, const uint8_t *data, int len) {
   if (len != (int)sizeof(LinkMsg)) return;
-  if (memcmp(mac, PEER_MAC, 6) != 0) return;       // not our Cardputer -> drop
   LinkMsg m;
   memcpy(&m, data, sizeof(m));
   if (m.magic != LINK_MAGIC) return;
+
+  if (m.type == MSG_ANNOUNCE) {
+    // Announce frames are unencrypted broadcasts and never matched against
+    // peerMac -- that's the whole point, so we can capture an unknown MAC.
+    if (pairScanning) {
+      memcpy((void *)pendingPairMac, mac, 6);
+      pairCaptured = true;
+    }
+    return;
+  }
+
+  if (memcmp(mac, peerMac, 6) != 0) return;       // not our Cardputer -> drop
 
   if (m.type == MSG_SLOT_INFO && m.slot < MAX_SLOTS) {
     portENTER_CRITICAL(&mux);
@@ -156,37 +193,44 @@ void linkOnRecv(const uint8_t *mac, const uint8_t *data, int len) {
 }
 #endif
 
+void registerPeer() {
+  esp_now_del_peer(peerMac);   // ok if it wasn't registered yet
+  if (!peerMacConfigured()) return;
+
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, peerMac, 6);
+  peer.channel = 1;
+  peer.ifidx   = WIFI_IF_STA;
+  peer.encrypt = true;
+  memcpy(peer.lmk, LINK_LMK, 16);
+  esp_now_add_peer(&peer);
+}
+
 void linkBegin() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
   WiFi.macAddress(ownMac);
 
-  if (!linkPeerConfigured()) return;
   if (esp_now_init() != ESP_OK) return;
   esp_now_set_pmk((const uint8_t *)LINK_PMK);
 
-  esp_now_peer_info_t peer = {};
-  memcpy(peer.peer_addr, PEER_MAC, 6);
-  peer.channel = 1;
-  peer.ifidx   = WIFI_IF_STA;
-  peer.encrypt = true;
-  memcpy(peer.lmk, LINK_LMK, 16);
-  if (esp_now_add_peer(&peer) != ESP_OK) return;
-
+  registerPeer();
+  // Recv callback is registered even with no peer configured yet, so a
+  // brand-new stick can still hear announce broadcasts and auto-pair.
   esp_now_register_recv_cb(linkOnRecv);
   linkReady = true;
 }
 
 void sendMsg(uint8_t type, uint8_t slot, uint8_t seq) {
-  if (!linkReady) return;
+  if (!linkReady || !peerMacConfigured()) return;
   LinkMsg m;
   memset(&m, 0, sizeof(m));
   m.magic = LINK_MAGIC;
   m.type  = type;
   m.slot  = slot;
   m.seq   = seq;
-  esp_now_send(PEER_MAC, (const uint8_t *)&m, sizeof(m));
+  esp_now_send(peerMac, (const uint8_t *)&m, sizeof(m));
 }
 
 void requestSync() {
@@ -235,7 +279,8 @@ void toggleDefault() {
 
 void sendSelected() {
   if (orderCount == 0) { setToast("No macros yet", ORANGE); return; }
-  if (!linkReady)      { setToast("Set PEER_MAC!", RED);    return; }
+  if (!peerMacConfigured()) { setToast("Not paired: hold A+B", RED); return; }
+  if (!linkReady) { setToast("Radio not ready", RED); return; }
   if (awaiting) return;
 
   int slot = order[sel];
@@ -252,6 +297,13 @@ void sendSelected() {
   setToast(msg, YELLOW);
 }
 
+void startPairScan() {
+  pairScanning  = true;
+  pairScanUntil = millis() + 15000;
+  pairCaptured  = false;
+  setToast("Pairing: listening...", CYAN);
+}
+
 void draw() {
   int W = M5.Display.width();
   int H = M5.Display.height();
@@ -262,31 +314,57 @@ void draw() {
   canvas.setTextSize(1);
   canvas.setTextColor(WHITE, NAVY);
   canvas.setCursor(4, 4);
-  canvas.printf("MACRO REMOTE  %d macros", orderCount);
+  canvas.printf("%d macros", orderCount);
+  canvas.setCursor(W - 46, 4);
+  canvas.printf("B:%d%%", batteryPct);
 
-  if (orderCount == 0) {
+  if (pairScanning) {
+    canvas.setTextColor(CYAN, BLACK);
+    canvas.setCursor(4, 24);
+    canvas.print("Pairing: listening...");
+    canvas.setTextColor(LIGHTGREY, BLACK);
+    canvas.setCursor(4, 38);
+    int secsLeft = (int)((pairScanUntil - millis()) / 1000);
+    if (secsLeft < 0) secsLeft = 0;
+    canvas.printf("Waiting for Cardputer (%ds)", secsLeft);
+    canvas.setCursor(4, 54);
+    canvas.print("Make sure this MAC is added");
+    canvas.setCursor(4, 66);
+    canvas.print("on the Cardputer's Pairing");
+    canvas.setCursor(4, 78);
+    canvas.print("screen:");
+
+    char me[20];
+    macToStr(ownMac, me);
+    canvas.setTextSize(2);
+    canvas.setCursor(4, 92);
+    canvas.print(me);
+    canvas.setTextSize(1);
+  } else if (orderCount == 0) {
     char me[20], peer[20];
     macToStr(ownMac, me);
-    macToStr(PEER_MAC, peer);
+    macToStr(peerMac, peer);
 
     canvas.setTextColor(linkReady ? WHITE : ORANGE, BLACK);
     canvas.setCursor(4, 24);
-    canvas.print(linkReady ? "Waiting for Cardputer sync..." : "PEER_MAC not set in code");
+    canvas.print(linkReady ? "Waiting for Cardputer sync..." : "Radio not ready");
     canvas.setTextColor(LIGHTGREY, BLACK);
     canvas.setCursor(4, 38);
-    canvas.print("Hold B = request sync");
+    canvas.print("Hold A+B = auto-pair");
+    canvas.setCursor(4, 50);
+    canvas.print("Hold B   = request sync");
 
     canvas.setTextColor(WHITE, BLACK);
-    canvas.setCursor(4, 60);
+    canvas.setCursor(4, 66);
     canvas.print("This stick's MAC:");
     canvas.setTextSize(2);
-    canvas.setCursor(4, 72);
+    canvas.setCursor(4, 78);
     canvas.print(me);
 
     canvas.setTextSize(1);
     canvas.setTextColor(DARKGREY, BLACK);
-    canvas.setCursor(4, 100);
-    canvas.printf("Peer: %s", peer);
+    canvas.setCursor(4, 104);
+    canvas.printf("Paired to: %s", peerMacConfigured() ? peer : "(none)");
   } else {
     // Scrolling window around the selection
     int first = sel - 2;
@@ -326,7 +404,7 @@ void draw() {
     canvas.print(toastText);
   } else {
     canvas.setTextColor(DARKGREY, BLACK);
-    canvas.print("A:send B:next | hold A:default B:sync");
+    canvas.print("A:send B:next | hold A:default B:sync A+B:pair");
   }
 }
 
@@ -361,6 +439,16 @@ void setup() {
   rebuildOrder(-1);
   sel = 0;
 
+  // Load the paired Cardputer's MAC from flash, falling back to the
+  // compiled-in default on first boot (no NVS entry yet).
+  memcpy(peerMac, DEFAULT_PEER_MAC, 6);
+  if (prefs.getBytesLength("peermac") == 6) {
+    prefs.getBytes("peermac", peerMac, 6);
+  }
+
+  batteryPct   = M5.Power.getBatteryLevel();
+  lastBattPoll = millis();
+
   linkBegin();
   requestSync();
 }
@@ -368,6 +456,12 @@ void setup() {
 void loop() {
   M5.update();
   uint32_t now = millis();
+
+  if (now - lastBattPoll > 5000) {
+    int lvl = M5.Power.getBatteryLevel();
+    if (lvl != batteryPct) { batteryPct = lvl; dirty = true; }
+    lastBattPoll = now;
+  }
 
   // Merge macro list updates received from the Cardputer
   if (rxDirty) {
@@ -388,18 +482,50 @@ void loop() {
     needSave = false;
   }
 
-  // Buttons
-  if (M5.BtnB.wasHold()) {
-    requestSync();
-    setToast("Syncing...", YELLOW);
-  } else if (M5.BtnB.wasClicked()) {
-    if (orderCount > 0) { sel = (sel + 1) % orderCount; dirty = true; }
+  // Auto-pair capture
+  if (pairScanning) {
+    if (pairCaptured) {
+      pairCaptured = false;
+      memcpy(peerMac, (const uint8_t *)pendingPairMac, 6);
+      prefs.putBytes("peermac", peerMac, 6);
+      registerPeer();
+      pairScanning = false;
+      setToast("Paired!", GREEN);
+      requestSync();
+    } else if (now > pairScanUntil) {
+      pairScanning = false;
+      setToast("Pairing timed out", ORANGE);
+    }
   }
 
-  if (M5.BtnA.wasHold()) {
-    toggleDefault();
-  } else if (M5.BtnA.wasClicked()) {
-    sendSelected();
+  // Detect A+B held together for the auto-pair combo.
+  if (M5.BtnA.isPressed() && M5.BtnB.isPressed()) {
+    if (comboPressStart == 0) {
+      comboPressStart = now;
+    } else if (!pairScanning && (now - comboPressStart > 1200)) {
+      startPairScan();
+      comboPressStart = 0;
+    }
+  } else {
+    comboPressStart = 0;
+  }
+
+  // Buttons (ignored while a pairing scan is in progress, and the combo
+  // above already consumes isPressed() for A+B so lone clicks/holds won't
+  // double-fire once a scan has started).
+  if (!pairScanning) {
+    if (M5.BtnB.wasHold()) {
+      requestSync();
+      setToast("Syncing...", YELLOW);
+    } else if (M5.BtnB.wasClicked()) {
+      if (orderCount > 0) { sel = (sel + 1) % orderCount; dirty = true; }
+    }
+
+    if (M5.BtnA.wasHold()) {
+      toggleDefault();
+    } else if (M5.BtnA.wasClicked()) {
+      sendSelected();
+    }
   }
 
   // Wait for the Cardputer's acknowledgement
@@ -424,7 +550,7 @@ void loop() {
   }
 
   // Keep asking until the list arrives
-  if (linkReady && orderCount == 0 && (now - lastSyncReq > 3000)) {
+  if (linkReady && peerMacConfigured() && orderCount == 0 && !pairScanning && (now - lastSyncReq > 3000)) {
     requestSync();
   }
 
@@ -433,7 +559,7 @@ void loop() {
     dirty = true;
   }
 
-  if (dirty) {
+  if (dirty || pairScanning) {
     draw();
     canvas.pushSprite(0, 0);
     dirty = false;
