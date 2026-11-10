@@ -6,36 +6,140 @@
   Target host: Windows 11
   MCU: ESP32-S3 (Stamp-S3), 240x135 TFT, 56-key matrix keyboard
 
-  CONNECTION MODE
-    Two mutually exclusive HID backends: USB (wired) and BLE (wireless).
-    The active mode is stored in flash (Preferences) and only ONE backend is
-    ever initialized per boot -- switching modes writes the new setting and
-    reboots the device so it comes up clean in the new mode. This is
-    deliberate: hot-swapping the TinyUSB stack and the BLE stack within a
-    single running session is not reliably supported on ESP32-S3 Arduino, so
-    "pick mode -> save -> restart" is the robust way to get a clean switch.
+  ----------------------------------------------------------------------------
+  WHAT THIS IS
+  ----------------------------------------------------------------------------
+  Turns the Cardputer into a 13-slot macro keyboard. Each slot is bound to a
+  physical key on the Cardputer's keyboard (default: 1-9, z, x, c, v) and,
+  when pressed, sends one of three kinds of action to whatever PC it's
+  connected to (over USB cable OR Bluetooth LE -- your choice):
+    - type out a fixed piece of text (e.g. a saved username/password)
+    - open Windows Run (Win+R), type a command/path/URL, hit Enter
+    - fire a hotkey combination (e.g. WIN+L to lock the PC)
+  All 13 slots are fully editable on-device: you can change which key
+  triggers a slot, what type of action it performs, its display label, and
+  its payload (the text/command/combo it sends) -- no reflashing needed for
+  day-to-day changes. Edits are saved to flash (Preferences / NVS) and
+  survive power cycles.
 
-    From the EDITOR screen's slot list (FOCUS_LIST, not while text-editing),
-    press 'M' to toggle USB <-> BLE. You'll get a confirm screen, then it
-    reboots.
+  ----------------------------------------------------------------------------
+  HOW TO USE IT ON THE DEVICE
+  ----------------------------------------------------------------------------
+  There are two screens (modes), and you switch between them with the '0' key:
 
-  REQUIRED LIBRARIES
-    - M5Cardputer / M5Unified / M5GFX (as before)
-    - "ESP32 BLE Keyboard" by T-vK (Library Manager search: ESP32 BLE Keyboard)
-      -> pulls in NimBLE-Arduino automatically as a dependency.
+  ** ACTIVE MODE (default on boot) **
+    This is the "working" screen. The top bar shows your current connection
+    mode (USB or BLE) and, in BLE mode, whether a host is currently paired
+    and connected.
+    - Press any key that's bound to a slot (shown as "[X] Label" on screen)
+      and that macro fires immediately -- text gets typed / Run dialog opens
+      / hotkey gets sent to whatever device you're connected to.
+    - Slots with no payload set show as "--empty--" and do nothing if pressed.
+    - Press '0' to enter EDITOR MODE.
 
-  BOARD SETTINGS (Arduino IDE)
-    Tools -> USB Mode: "USB-OTG (TinyUSB)"
-    Tools -> USB CDC On Boot: "Enabled"
-  Required for USBHIDKeyboard to resolve/compile on ESP32-S3 targets.
+  ** EDITOR MODE **
+    This is where you customize slots. The left column is the slot list;
+    the right panel shows the fields of whichever slot is open.
+      Slot list (left column has focus):
+        Up / Down  -> move the highlighted slot
+        Right or Enter -> open the highlighted slot's fields (focus moves
+                          to the right-hand field panel)
+        'M'        -> switch connection mode (USB <-> BLE). See "SWITCHING
+                      CONNECTION MODE" below -- this reboots the device.
+        '0'        -> exit editor, return to Active Mode
+      Field panel (right column has focus, slot is "open"):
+        Up / Down  -> move between the 4 fields: Key, Type, Label, Payload
+        Left       -> go back to the slot list (closes this slot)
+        Enter on "Type"    -> cycles RAW_TEXT -> WIN_RUN -> HOTKEY -> ...
+        Enter on "Key/Label/Payload" -> starts text-editing that field:
+            - type on the Cardputer keyboard to enter text
+            - Backspace/Del removes the last character
+            - Enter saves the field and exits text-editing
+          (the "Key" field only ever keeps 1 character -- whatever you type
+          last replaces it, since a trigger key is always a single key)
+        '0' is NOT available as "exit" while text-editing, so you can safely
+          type a literal 0 into a payload (e.g. part of a password or URL).
 
-  NOTE ON KEY-CODE MACROS
-    USBHIDKeyboard.h and BleKeyboard.h both define identically-named macros
-    (KEY_LEFT_GUI, KEY_ESC, KEY_F1, ...). Including both headers in one file
-    causes macro-redefinition errors. We dodge this by capturing each
-    library's constants under our own prefixed names (USBKEY_*, BLEKEY_*)
-    immediately after including each header, then #undef-ing the shared
-    names before the next header is pulled in.
+  ** SWITCHING CONNECTION MODE (USB <-> BLE) **
+    From the editor's slot list (list must have focus, not a field, and you
+    must NOT be mid-edit of a text field), press 'M'.
+    The screen shows "SWITCHING MODE... Restarting" and the device reboots
+    itself after ~1.2 seconds. On boot it reads the saved mode from flash
+    and initializes ONLY that one HID backend (USB or BLE) -- the other is
+    never touched. This is intentional: swapping the USB and BLE stacks
+    live, without a reboot, is not reliable on ESP32-S3, so the device
+    always comes up clean in whichever mode you last chose, and stays in
+    that mode across normal power cycles too (it's saved, not just for this
+    session).
+
+  ** PAIRING OVER BLUETOOTH (BLE mode) **
+    Once booted in BLE mode, the device advertises itself as a Bluetooth LE
+    keyboard named "Cardputer MacroPad".
+    On the Windows 11 PC: Settings -> Bluetooth & devices -> Add device ->
+    Bluetooth -> select "Cardputer MacroPad" -> it pairs like any BT
+    keyboard, no PIN needed. The Cardputer's top status bar shows "BLE:..."
+    while waiting and "BLE:OK" once a host is actually connected. Macro
+    keys are ignored (silently) until a host is connected, so you can't
+    accidentally fire a macro into nothing.
+    If Windows ever shows it as paired but stuck "not connecting": remove
+    the device from Windows Bluetooth settings and re-pair. That's a known
+    quirk of BLE HID devices in general, not specific to this code.
+
+  ** USING OVER USB (USB mode) **
+    Just plug the Cardputer into the PC with a USB-C data cable. No pairing,
+    no drivers -- Windows sees a standard USB HID keyboard immediately.
+
+  ----------------------------------------------------------------------------
+  MACRO TYPES EXPLAINED (what each Type does with its Payload)
+  ----------------------------------------------------------------------------
+    RAW_TEXT      Payload is typed out literally, character by character.
+                  Good for usernames, passwords, snippets.
+    WIN_RUN       Sends Win+R (opens the Windows Run dialog), waits briefly
+                  for it to open, types the Payload, then presses Enter.
+                  Good for launching apps ("notepad", "calc") or opening a
+                  URL/file path directly.
+    HOTKEY_COMBO  Payload is parsed as '+'-separated tokens, e.g.
+                  "CTRL+SHIFT+ESC" or "WIN+L". Recognized modifier tokens:
+                  WIN/GUI, CTRL/CONTROL, SHIFT, ALT. Recognized final-key
+                  tokens: any single character (a-z, 0-9, etc.), ESC/ESCAPE,
+                  TAB, ENTER/RETURN, SPACE, DEL/DELETE, F1 through F12.
+                  All modifiers are held down, then the final key is
+                  pressed, then everything is released.
+
+  ----------------------------------------------------------------------------
+  REQUIRED LIBRARIES (install via Arduino Library Manager, or list them in
+  your CI workflow if you're building headless / via GitHub Actions)
+  ----------------------------------------------------------------------------
+    - M5Cardputer   (and its dependencies M5Unified, M5GFX)
+    - "ESP32 BLE Keyboard" by T-vK  <-- provides BleKeyboard.h
+    - "NimBLE-Arduino" by h2zero    <-- required dependency of the above;
+                                        BleKeyboard.h will fail to compile
+                                        or link without it even though
+                                        nothing in this .ino includes it
+                                        directly.
+  If you're compiling in GitHub Actions (e.g. with arduino/compile-sketches
+  or raw arduino-cli), make sure BOTH of the above are explicitly installed
+  in the workflow -- they are not pulled in automatically just because
+  M5Cardputer is listed, and a missing library manifests as
+  "fatal error: BleKeyboard.h: No such file or directory".
+
+  ----------------------------------------------------------------------------
+  BOARD SETTINGS (Arduino IDE, Tools menu)
+  ----------------------------------------------------------------------------
+    USB Mode:        "USB-OTG (TinyUSB)"
+    USB CDC On Boot: "Enabled"
+  Required for USBHIDKeyboard to resolve/compile on ESP32-S3 targets at all,
+  independent of which connection mode you actually run in.
+
+  ----------------------------------------------------------------------------
+  NOTE ON KEY-CODE MACROS (implementation detail, not user-facing)
+  ----------------------------------------------------------------------------
+  USBHIDKeyboard.h and BleKeyboard.h both define identically-named macros
+  (KEY_LEFT_GUI, KEY_ESC, KEY_F1, ...). Including both headers in one file
+  causes macro-redefinition errors. We dodge this by capturing each
+  library's constants under our own prefixed names (USBKEY_*, BLEKEY_*)
+  immediately after including each header, then #undef-ing the shared names
+  before the next header is pulled in.
   ============================================================================
 */
 
@@ -81,7 +185,7 @@
 #undef KEY_F1
 
 // ----------------------------------------------------------------------------
-// HID backend #2: BLE  (T-vK "ESP32 BLE Keyboard" library)
+// HID backend #2: BLE  (T-vK "ESP32 BLE Keyboard" library, needs NimBLE-Arduino)
 // ----------------------------------------------------------------------------
 #include <BleKeyboard.h>
 
@@ -261,7 +365,7 @@ void setup() {
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
 
-  M5Cardputer.Display.setRotation(3);
+  M5Cardputer.Display.setRotation(1);
   M5Cardputer.Display.setBrightness(80);
 
   canvas.setColorDepth(8);
