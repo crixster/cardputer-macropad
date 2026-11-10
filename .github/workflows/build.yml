@@ -20,8 +20,8 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
           arduino-cli lib install M5Cardputer
-          arduino-cli lib install "ESP32 BLE Keyboard"
           arduino-cli lib install "NimBLE-Arduino"
+          arduino-cli lib install --git-url https://github.com/T-vK/ESP32-BLE-Keyboard.git
 
       - name: Prepare Sketch Structure and Compile
         run: |
